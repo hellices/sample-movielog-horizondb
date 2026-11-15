@@ -23,3 +23,4 @@ if [ "${ENTRA_APP_CREATED:-}" = "true" ] && [ -n "${ENTRA_CLIENT_ID:-}" ]; then
   azd env set ENTRA_APP_CREATED ""
 fi
 azd env set HORIZONDB_HOST ""
+azd env set TMDB_ENRICHED ""

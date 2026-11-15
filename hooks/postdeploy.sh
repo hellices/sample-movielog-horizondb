@@ -75,11 +75,17 @@ if [ "$movies" = "0" ]; then
   log "Loading the catalog (Wikidata and Wikipedia, about 10 minutes)"
   python3 data/build_catalog.py
   admin_psql -d movielog -q -f data/out/catalog.sql
-  if [ -n "${TMDB_API_TOKEN:-}" ]; then
-    log "Filling posters from TMDB"
-    python3 data/enrich_tmdb.py
-    admin_psql -d movielog -q -f data/out/tmdb.sql
+  TMDB_ENRICHED=""   # a freshly loaded catalog has no posters, whatever an earlier environment recorded
+fi
+# TMDB enrichment is tracked on its own, so a failed run or a token added later is retried on the next deploy.
+if [ -n "${TMDB_API_TOKEN:-}" ] && [ "${TMDB_ENRICHED:-}" != "true" ]; then
+  log "Filling posters from TMDB"
+  if [ ! -f data/out/catalog.json ]; then
+    python3 data/build_catalog.py   # regenerates the TMDB id list; UPDATEs skip movies that are not loaded
   fi
+  python3 data/enrich_tmdb.py
+  admin_psql -d movielog -q -f data/out/tmdb.sql
+  azd env set TMDB_ENRICHED true
 fi
 # Each step checks what is already in the database, so a rerun after a failure resumes where it stopped.
 missing() { admin_psql -d movielog -Atc "SELECT count(*) FROM catalog.movie_docs WHERE $1 IS NULL"; }
@@ -96,10 +102,12 @@ fi
 missing_bge="$(missing embedding_bge)"
 if [ "$missing_bge" != "0" ]; then
   log "Embedding $missing_bge documents with bge-m3-ko through vLLM"
-  kubectl port-forward -n movielog svc/embeddings 18081:80 >/dev/null 2>&1 &
-  port_forward=$!
-  retry 5 15 embed --model bge
-  kill "$port_forward"
+  # The subshell stops its port-forward on exit, also when the retries are exhausted.
+  (
+    kubectl port-forward -n movielog svc/embeddings 18081:80 >/dev/null 2>&1 &
+    trap 'kill $! 2>/dev/null || true' EXIT
+    retry 5 15 embed --model bge
+  )
 fi
 
 indexes="$(admin_psql -d movielog -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname = 'catalog'

@@ -43,6 +43,20 @@ class DiscoverModelWebTests extends IntegrationTest {
 	}
 
 	@Test
+	void offersTheOtherModelWhenTheSearchFails() throws Exception {
+		given(discoverService.resolveModel(null)).willReturn(EmbeddingModel.BGE);
+		given(discoverService.configuredModels()).willReturn(List.of(EmbeddingModel.OPENAI, EmbeddingModel.BGE));
+		given(discoverService.searchWithCorrection(eq("dune"), anyInt(), anyString(), eq(EmbeddingModel.BGE)))
+			.willThrow(new DiscoverUnavailableException("embedding server unavailable", null));
+
+		mockMvc.perform(get("/discover").param("q", "dune"))
+			.andExpect(status().isOk())
+			.andExpect(content().string(containsString("카탈로그 검색을 사용할 수 없습니다")))
+			.andExpect(content().string(containsString("href=\"/discover?q=dune&amp;model=openai\"")))
+			.andExpect(content().string(containsString("Azure OpenAI text-embedding-3-large(으)로 다시 검색")));
+	}
+
+	@Test
 	void keepsAnExplicitModelForTheNextQuery() throws Exception {
 		given(discoverService.resolveModel("openai")).willReturn(EmbeddingModel.OPENAI);
 		given(discoverService.configuredModels()).willReturn(List.of(EmbeddingModel.OPENAI, EmbeddingModel.BGE));

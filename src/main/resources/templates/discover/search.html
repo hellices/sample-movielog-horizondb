@@ -28,6 +28,11 @@
 
 	<article class="round error-container" th:if="${searchFailed}">
 		<p>카탈로그 검색을 사용할 수 없습니다. 임베딩과 그래프가 적재됐는지 확인해 주세요.</p>
+		<p th:if="${otherModel != null}">
+			<span th:text="|임베딩 모델: ${searchModelLabel}|">임베딩 모델: 모델</span>
+			· <a class="link" th:href="@{/discover(q=${q},model=${otherModel})}"
+				th:text="|${otherModelLabel}(으)로 다시 검색|">다른 모델로 다시 검색</a>
+		</p>
 	</article>
 	<article class="round error-container" th:if="${searchLimited}">
 		<p>의미 검색 요청이 많아 잠시 제한했습니다. 1분 뒤에 다시 시도해 주세요.</p>
