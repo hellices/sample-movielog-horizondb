@@ -40,7 +40,7 @@ kubectl rollout status deploy/embeddings -n movielog --timeout=25m
 export ENTRA_CREDENTIAL_ID="${ENTRA_CREDENTIAL_ID:-}"
 running_credential="$(kubectl get deploy movielog -n movielog \
   -o jsonpath='{.spec.template.metadata.annotations.movielog/entra-credential}' 2>/dev/null || true)"
-if kubectl get deploy movielog -n movielog -o none 2>/dev/null && [ "$running_credential" != "$ENTRA_CREDENTIAL_ID" ]; then
+if kubectl get deploy movielog -n movielog -o name >/dev/null 2>&1 && [ "$running_credential" != "$ENTRA_CREDENTIAL_ID" ]; then
   log "Entra credential changed: refreshing the movielog-keyvault secret"
   kubectl delete secret movielog-keyvault -n movielog --ignore-not-found
 fi
