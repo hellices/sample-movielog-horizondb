@@ -112,6 +112,7 @@ class ReviewWebTests extends IntegrationTest {
 			.andExpect(status().isOk())
 			.andExpect(content().string(containsString("첫 화면에 보이는 리뷰")))
 			.andExpect(content().string(containsString("https://image.tmdb.org/t/p/w185/poster496243.jpg")))
+			.andExpect(content().string(containsString("class=\"stars\" role=\"img\" title=\"별점 ")))
 			.andExpect(content().string(containsString("data-has-next=\"false\"")));
 	}
 
