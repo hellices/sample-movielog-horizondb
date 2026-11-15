@@ -146,14 +146,15 @@ rm -rf "$SECRETS"
 ```bash
 ACR_SERVER="$(az acr show -n "$ACR" --query loginServer -o tsv)"
 # Released image pinned by digest: the image value printed by the release workflow (also in the docs sample.yml).
-IMAGE="ghcr.io/hellices/sample-movielog-horizondb:2.6.4@sha256:<digest>"
-az acr import --name "$ACR" --source "${IMAGE%%:*}@${IMAGE#*@}" --image movielog:2.6.4 --force
+VERSION=2.6.5  # release to deploy
+IMAGE="ghcr.io/hellices/sample-movielog-horizondb:$VERSION@sha256:<digest>"
+az acr import --name "$ACR" --source "${IMAGE%%:*}@${IMAGE#*@}" --image "movielog:$VERSION" --force
 az acr build -r "$ACR" -t observability/applicationinsights-agent:3.7.10 --platform linux/amd64 agent-init
 az aks get-credentials -g $RG -n aks-movielog-hz
 
 export MI_CLIENT_ID="$(az identity show -g $RG -n id-movielog-app --query clientId -o tsv)"
 export AZURE_OPENAI_ENDPOINT="https://$AOAI.openai.azure.com/"
-export APP_IMAGE="$ACR_SERVER/movielog:2.6.4"
+export APP_IMAGE="$ACR_SERVER/movielog:$VERSION"
 export APPLICATIONINSIGHTS_CONNECTION_STRING="$(az monitor app-insights component show \
   -g $RG -a appi-movielog-hz --query connectionString -o tsv)"
 envsubst < k8s/00-namespace.yaml | kubectl apply -f -
