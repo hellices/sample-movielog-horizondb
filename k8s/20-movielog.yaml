@@ -18,6 +18,8 @@ spec:
       annotations:
         # Must be on the Pod template. The value is the Instrumentation CR name.
         instrumentation.opentelemetry.io/inject-java: "movielog"
+        # Entra credential the Pods were started with; a renewed credential changes it and rolls the Pods.
+        movielog/entra-credential: "${ENTRA_CREDENTIAL_ID}"
     spec:
       serviceAccountName: movielog
       containers:
@@ -27,9 +29,9 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            # entra adds Microsoft Entra ID sign-in next to the form login.
+            # aks, or aks,entra to add Microsoft Entra ID sign-in next to the form login.
             - name: SPRING_PROFILES_ACTIVE
-              value: aks,entra
+              value: "${SPRING_PROFILES_ACTIVE}"
             # Azure HorizonDB read-write endpoint, e.g.
             # jdbc:postgresql://<cluster>.rw.<id>.<region>.horizondb.azure.com:5432/movielog?sslmode=require
             - name: SPRING_DATASOURCE_URL
@@ -49,6 +51,11 @@ spec:
                   key: password
             - name: AZURE_OPENAI_ENDPOINT
               value: "${AZURE_OPENAI_ENDPOINT}"
+            # bge-m3-ko served by vLLM (40-embeddings-vllm.yaml); the default model for semantic search.
+            - name: EMBEDDINGS_BGE_URL
+              value: http://embeddings.movielog.svc.cluster.local
+            - name: EMBEDDING_DEFAULT_MODEL
+              value: bge
             # Synced from Key Vault by 24-keyvault-secrets.yaml when the keyvault volume below is mounted.
             - name: TMDB_API_KEY
               valueFrom:

@@ -10,6 +10,8 @@ permissions:
   packages: write
   id-token: write
   attestations: write
+env:
+  AGENT_VERSION: "3.7.10"
 jobs:
   image:
     runs-on: ubuntu-latest
@@ -44,6 +46,20 @@ jobs:
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      # Application Insights Java agent init image that hooks/postdeploy.sh uses when the managed injection is older
+      # than 3.7.9. The Dockerfile pins the agent jar by SHA-256.
+      - id: agent
+        uses: docker/build-push-action@v7
+        with:
+          context: agent-init
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/applicationinsights-agent:${{ env.AGENT_VERSION }}
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/applicationinsights-agent
+          subject-digest: ${{ steps.agent.outputs.digest }}
           push-to-registry: true
       - name: Values for the documentation sample.yml
         env:

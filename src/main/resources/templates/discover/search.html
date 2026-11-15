@@ -11,11 +11,16 @@
 			<input type="search" name="q" th:value="${q}" maxlength="200" autofocus
 				placeholder="보고 싶은 영화를 설명해 보세요 (예: 꿈속에서 벌어지는 하이스트, 가족이 함께 보는 애니메이션)"
 				aria-label="의미 검색어">
+			<input type="hidden" name="model" th:if="${requestedModel != null}" th:value="${requestedModel}">
 		</div>
 	</form>
 
+	<p class="secondary-text" th:if="${modelNotice}">
+		요청한 임베딩 모델을 사용할 수 없어 기본 모델(<span th:text="${searchModelLabel}">모델</span>)로 검색합니다.
+	</p>
+
 	<p class="secondary-text" th:if="${#strings.isEmpty(q)}">
-		질의는 앱이 Azure OpenAI <code>text-embedding-3-large</code>로 임베딩하고, HorizonDB가 pgvector
+		질의는 앱이 임베딩 모델(<span th:text="${searchModelLabel}">모델</span>)로 임베딩하고, HorizonDB가 pgvector
 		코사인 거리(<code>&lt;=&gt;</code>)로 영화 문서 임베딩과 비교합니다. DiskANN 인덱스가 있지만 영화 수가 적어
 		planner가 전체 비교를 고를 수 있습니다. 결과 영화들 사이의 공통 감독·배우·장르는 Apache AGE 그래프로 함께
 		보여 줍니다.
@@ -23,6 +28,11 @@
 
 	<article class="round error-container" th:if="${searchFailed}">
 		<p>카탈로그 검색을 사용할 수 없습니다. 임베딩과 그래프가 적재됐는지 확인해 주세요.</p>
+		<p th:if="${otherModel != null}">
+			<span th:text="|임베딩 모델: ${searchModelLabel}|">임베딩 모델: 모델</span>
+			· <a class="link" th:href="@{/discover(q=${q},model=${otherModel})}"
+				th:text="|${otherModelLabel}(으)로 다시 검색|">다른 모델로 다시 검색</a>
+		</p>
 	</article>
 	<article class="round error-container" th:if="${searchLimited}">
 		<p>의미 검색 요청이 많아 잠시 제한했습니다. 1분 뒤에 다시 시도해 주세요.</p>
@@ -44,6 +54,13 @@
 		</p>
 		<p class="secondary-text">
 			<b th:text="|'${correction != null ? correction.query : q}'|">'검색어'</b>와 가까운 영화 <span th:text="${hits.size()}">0</span>편
+		</p>
+		<p class="small-text secondary-text">
+			임베딩 모델: <span th:text="${searchModelLabel}">모델</span>
+			<th:block th:if="${otherModel != null}">
+				· <a class="link" th:href="@{/discover(q=${correction != null ? correction.query : q},model=${otherModel})}"
+					th:text="|${otherModelLabel}(으)로 다시 검색|">다른 모델로 다시 검색</a>
+			</th:block>
 		</p>
 		<ul class="list border discover-list">
 			<li th:each="hit, stat : ${hits}">

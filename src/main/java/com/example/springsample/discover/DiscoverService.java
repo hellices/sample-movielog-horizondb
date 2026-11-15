@@ -10,6 +10,7 @@ import java.util.function.Supplier;
 import com.example.springsample.movie.MovieService;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -18,10 +19,11 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 
 /**
- * Semantic search (query embedded in the app with Azure OpenAI, pgvector cosine distance in HorizonDB) and graph
- * exploration (Apache AGE).
- * Each call is timed as {@code movielog.discover.*} with an {@code outcome} tag so the AKS
- * Application Insights agent exports it to customMetrics next to the other movielog meters.
+ * Semantic search (query embedded in the app with an {@link EmbeddingModel}, pgvector cosine distance in HorizonDB)
+ * and graph exploration (Apache AGE).
+ * Each call is timed as {@code movielog.discover.*} with an {@code outcome} tag, and embedding, search and similar
+ * calls also with a {@code model} tag, so the AKS Application Insights agent exports it to customMetrics next to the
+ * other movielog meters.
  */
 @Service
 public class DiscoverService {
@@ -38,7 +40,7 @@ public class DiscoverService {
 
 	private static final String GRAPH_POSTER_SIZE = "w92";
 
-	private final EmbeddingClient embeddings;
+	private final EmbeddingModels embeddings;
 
 	private final VectorSearchRepository vectors;
 
@@ -56,7 +58,7 @@ public class DiscoverService {
 
 	private final Counter corrected;
 
-	public DiscoverService(EmbeddingClient embeddings, VectorSearchRepository vectors, MovieGraphRepository graph,
+	public DiscoverService(EmbeddingModels embeddings, VectorSearchRepository vectors, MovieGraphRepository graph,
 			MeterRegistry registry, DiscoverRateLimiter rateLimiter, QueryCorrector corrector, MovieService movies) {
 		this.embeddings = embeddings;
 		this.vectors = vectors;
@@ -64,7 +66,7 @@ public class DiscoverService {
 		this.registry = registry;
 		this.rateLimiter = rateLimiter;
 		this.rejected = Counter.builder("movielog.discover.rejected")
-			.description("Semantic searches refused by the rate cap before calling Azure OpenAI")
+			.description("Semantic searches refused by the rate cap before calling the embedding model")
 			.register(registry);
 		this.corrector = corrector;
 		this.movies = movies;
@@ -73,18 +75,44 @@ public class DiscoverService {
 			.register(registry);
 	}
 
+	/** The model used when a request names none. */
+	public EmbeddingModel defaultModel() {
+		return embeddings.defaultModel();
+	}
+
+	/** Models with an endpoint, which a request may name. */
+	public List<EmbeddingModel> configuredModels() {
+		return embeddings.configured();
+	}
+
+	/**
+	 * The model named by a request parameter, or the default model when it is blank.
+	 * @throws UnknownEmbeddingModelException when the name is unknown or the model is not configured
+	 */
+	public EmbeddingModel resolveModel(@Nullable String requested) {
+		return embeddings.resolve(requested);
+	}
+
 	/**
 	 * @param client address of the caller (after forwarded headers), used for the per-client rate cap
 	 */
 	public List<MovieHit> search(String query, int limit, String client) {
-		return searchWithCorrection(query, limit, client).hits();
+		return search(query, limit, client, defaultModel());
+	}
+
+	public List<MovieHit> search(String query, int limit, String client, EmbeddingModel model) {
+		return searchWithCorrection(query, limit, client, model).hits();
+	}
+
+	public DiscoverSearch searchWithCorrection(String query, int limit, String client) {
+		return searchWithCorrection(query, limit, client, defaultModel());
 	}
 
 	/**
 	 * Like {@link #search}, and reports a corrected person name or title. The corrected query is embedded and
 	 * matched by keywords; the web page shows which words were replaced.
 	 */
-	public DiscoverSearch searchWithCorrection(String query, int limit, String client) {
+	public DiscoverSearch searchWithCorrection(String query, int limit, String client, EmbeddingModel model) {
 		if (!rateLimiter.tryAcquire(client)) {
 			rejected.increment();
 			throw new DiscoverRateLimitedException("Too many semantic searches; try again in a minute");
@@ -95,19 +123,25 @@ public class DiscoverService {
 			corrected.increment();
 		}
 		String input = (correction == null) ? typed : correction.query();
-		float[] embedding = timed("movielog.discover.embedding", "query", () -> embeddings.embed(input), v -> false);
-		List<MovieHit> hits = timed("movielog.discover.search", "vector",
-				() -> vectors.search(embedding, input, Math.clamp(limit, 1, MAX_RESULTS)), List::isEmpty);
-		return new DiscoverSearch(hits, correction);
+		float[] embedding = timed("movielog.discover.embedding", "query", model,
+				() -> embeddings.embed(model, input), v -> false);
+		List<MovieHit> hits = timed("movielog.discover.search", "vector", model,
+				() -> vectors.search(model, embedding, input, Math.clamp(limit, 1, MAX_RESULTS)), List::isEmpty);
+		return new DiscoverSearch(hits, correction, model);
 	}
 
-	/** Search results and, when the query was corrected, the replaced words. */
-	public record DiscoverSearch(List<MovieHit> hits, @Nullable QueryCorrection correction) {
+	/** Search results, the model that embedded the query and, when the query was corrected, the replaced words. */
+	public record DiscoverSearch(List<MovieHit> hits, @Nullable QueryCorrection correction, EmbeddingModel model) {
 	}
 
 	public List<MovieHit> similar(long tmdbId, int limit) {
-		return timed("movielog.discover.similar", "vector",
-				() -> vectors.similar(tmdbId, Math.clamp(limit, 1, MAX_RESULTS)), List::isEmpty);
+		return similar(tmdbId, limit, defaultModel());
+	}
+
+	/** Neighbors by the stored document vectors of {@code model}; no embedding call. */
+	public List<MovieHit> similar(long tmdbId, int limit, EmbeddingModel model) {
+		return timed("movielog.discover.similar", "vector", model,
+				() -> vectors.similar(model, tmdbId, Math.clamp(limit, 1, MAX_RESULTS)), List::isEmpty);
 	}
 
 	/** The catalog's attributed summary of the movie, or null when there is none or the catalog cannot be read. */
@@ -166,6 +200,14 @@ public class DiscoverService {
 	}
 
 	private <T> T timed(String name, String kind, Supplier<T> call, Predicate<T> empty) {
+		return timed(name, Tags.of("kind", kind), kind, call, empty);
+	}
+
+	private <T> T timed(String name, String kind, EmbeddingModel model, Supplier<T> call, Predicate<T> empty) {
+		return timed(name, Tags.of("kind", kind, "model", model.id()), kind + ", " + model.id(), call, empty);
+	}
+
+	private <T> T timed(String name, Tags tags, String detail, Supplier<T> call, Predicate<T> empty) {
 		Timer.Sample sample = Timer.start(registry);
 		String outcome = "error";
 		try {
@@ -174,15 +216,15 @@ public class DiscoverService {
 			return result;
 		}
 		catch (DataAccessException ex) {
-			logger.warn("{} ({}) failed: {}", name, kind, ex.getMostSpecificCause().getMessage());
+			logger.warn("{} ({}) failed: {}", name, detail, ex.getMostSpecificCause().getMessage());
 			throw new DiscoverUnavailableException("Catalog search is not available", ex);
 		}
 		catch (EmbeddingUnavailableException ex) {
-			logger.warn("{} ({}) failed: {}", name, kind, ex.getMessage());
+			logger.warn("{} ({}) failed: {}", name, detail, ex.getMessage());
 			throw new DiscoverUnavailableException("Query embedding is not available", ex);
 		}
 		finally {
-			sample.stop(registry.timer(name, "kind", kind, "outcome", outcome));
+			sample.stop(registry.timer(name, tags.and("outcome", outcome)));
 		}
 	}
 

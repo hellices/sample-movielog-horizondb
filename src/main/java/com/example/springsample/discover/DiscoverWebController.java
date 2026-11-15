@@ -23,14 +23,40 @@ class DiscoverWebController {
 
 	private final MovieService movieService;
 
+	/**
+	 * An unknown or unconfigured {@code model} falls back to the default model with a notice. When both models are
+	 * configured, the page links to the same query with the other model.
+	 */
 	@GetMapping("/discover")
-	String search(@RequestParam(required = false) @Nullable String q, Model model, HttpServletRequest request) {
+	String search(@RequestParam(required = false) @Nullable String q,
+			@RequestParam(name = "model", required = false) @Nullable String requestedModel, Model model,
+			HttpServletRequest request) {
 		String query = (q == null) ? "" : q.strip();
 		model.addAttribute("q", query);
+		EmbeddingModel embeddingModel;
+		try {
+			embeddingModel = discoverService.resolveModel(requestedModel);
+			if (StringUtils.hasText(requestedModel)) {
+				model.addAttribute("requestedModel", embeddingModel.id());
+			}
+		}
+		catch (UnknownEmbeddingModelException ex) {
+			embeddingModel = discoverService.defaultModel();
+			model.addAttribute("modelNotice", true);
+		}
+		model.addAttribute("searchModelLabel", embeddingModel.label());
+		EmbeddingModel current = embeddingModel;
+		List<EmbeddingModel> configured = discoverService.configuredModels();
+		if (configured.contains(current)) {
+			configured.stream().filter(other -> other != current).findFirst().ifPresent(other -> {
+				model.addAttribute("otherModel", other.id());
+				model.addAttribute("otherModelLabel", other.label());
+			});
+		}
 		if (StringUtils.hasText(query)) {
 			try {
 				DiscoverService.DiscoverSearch search = discoverService.searchWithCorrection(query, PAGE_RESULTS,
-						request.getRemoteAddr());
+						request.getRemoteAddr(), embeddingModel);
 				List<MovieHit> hits = search.hits();
 				model.addAttribute("hits", hits);
 				model.addAttribute("correction", search.correction());

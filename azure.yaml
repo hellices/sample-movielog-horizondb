@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+# azd up: Bicep (infra/) creates the Azure resources, the hooks create Azure HorizonDB (no Bicep types yet), prepare
+# the database and Kubernetes, then deploy the released image from GHCR and load the catalog. azd down removes it all.
+name: sample-movielog-horizondb
+metadata:
+  template: sample-movielog-horizondb
+infra:
+  provider: bicep
+  path: infra
+hooks:
+  preprovision:
+    shell: sh
+    run: bash hooks/preprovision.sh
+  postprovision:
+    shell: sh
+    run: bash hooks/postprovision.sh
+  postdeploy:
+    shell: sh
+    run: bash hooks/postdeploy.sh
+  predown:
+    shell: sh
+    run: bash hooks/predown.sh

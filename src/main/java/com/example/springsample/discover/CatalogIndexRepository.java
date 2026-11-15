@@ -9,6 +9,7 @@ import com.example.springsample.discover.TmdbCreditsClient.Credit;
 import com.example.springsample.discover.TmdbCreditsClient.Credits;
 import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.core.simple.JdbcClient.StatementSpec;
 import org.springframework.stereotype.Repository;
 
 /**
@@ -53,18 +54,25 @@ class CatalogIndexRepository {
 	}
 
 	/**
-	 * Without {@code overview} and {@code source_url} the movie page keeps showing the TMDB overview instead of a
-	 * Wikipedia attribution. A later catalog load replaces the row and clears the embedding when the text differs.
+	 * Stores the document with one vector per model, each in the model's column. Without {@code overview} and
+	 * {@code source_url} the movie page keeps showing the TMDB overview instead of a Wikipedia attribution. A later
+	 * catalog load replaces the row and clears the embeddings when the text differs.
 	 */
-	void insert(long tmdbId, String doc, float[] embedding) {
-		jdbc.sql("""
-				INSERT INTO catalog.movie_docs (tmdb_id, doc, embedding, embedded_at)
-				VALUES (:tmdbId, :doc, CAST(:v AS vector), now())
-				ON CONFLICT (tmdb_id) DO NOTHING""")
+	void insert(long tmdbId, String doc, Map<EmbeddingModel, float[]> embeddings) {
+		StringBuilder columns = new StringBuilder();
+		StringBuilder values = new StringBuilder();
+		for (EmbeddingModel model : embeddings.keySet()) {
+			columns.append(", ").append(model.column());
+			values.append(", ").append(model.castParameter(model.id()));
+		}
+		StatementSpec statement = jdbc.sql("""
+				INSERT INTO catalog.movie_docs (tmdb_id, doc%s, embedded_at)
+				VALUES (:tmdbId, :doc%s, now())
+				ON CONFLICT (tmdb_id) DO NOTHING""".formatted(columns, values))
 			.param("tmdbId", tmdbId)
-			.param("doc", doc)
-			.param("v", VectorSearchRepository.toLiteral(embedding))
-			.update();
+			.param("doc", doc);
+		embeddings.forEach((model, vector) -> statement.param(model.id(), VectorSearchRepository.toLiteral(vector)));
+		statement.update();
 	}
 
 	/**

@@ -33,8 +33,9 @@ CREATE TABLE IF NOT EXISTS catalog.movie_genres (
 	PRIMARY KEY (tmdb_id, genre)
 );
 
--- One embedded document per movie: text-embedding-3-large shortened to 1,536 dimensions;
--- data/embed_catalog.py fills embedding for rows where it is NULL.
+-- One embedded document per movie: embedding holds text-embedding-3-large shortened to 1,536 dimensions,
+-- embedding_bge the 1,024-dimension Korean BGE-M3 (dragonkue/BGE-m3-ko); data/embed_catalog.py --model openai|bge
+-- fills the column for rows where it is NULL.
 CREATE TABLE IF NOT EXISTS catalog.movie_docs (
 	tmdb_id bigint PRIMARY KEY,
 	wikidata_qid text,
@@ -50,6 +51,8 @@ ALTER TABLE catalog.movie_docs ADD COLUMN IF NOT EXISTS summary_en_source text;
 -- The shown Wikipedia summary next to its source_url, so attribution stays with this text even after the app
 -- refreshes public.movies.overview from TMDB.
 ALTER TABLE catalog.movie_docs ADD COLUMN IF NOT EXISTS overview text;
+-- Second embedding model; SIMILAR_TO edges of the graph (30-graph.sql, 40-graph-sync.sql) use this column.
+ALTER TABLE catalog.movie_docs ADD COLUMN IF NOT EXISTS embedding_bge vector(1024);
 
 GRANT USAGE ON SCHEMA catalog TO movielog;
 GRANT SELECT ON ALL TABLES IN SCHEMA catalog TO movielog;

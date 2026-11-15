@@ -12,8 +12,10 @@
 
 ## 예제 범위
 
-- **의미 검색** — 영화 문서와 질의를 Azure OpenAI `text-embedding-3-large`로 임베딩하고, pgvector·DiskANN
-  벡터 순위와 키워드 순위를 RRF로 합칩니다. 인물·제목의 철자 오류도 교정합니다.
+- **의미 검색** — 영화 문서와 질의를 한국어 BGE-M3(`dragonkue/BGE-m3-ko`, 1,024차원)로 임베딩하고, pgvector·DiskANN
+  벡터 순위와 키워드 순위를 RRF로 합칩니다. 인물·제목의 철자 오류도 교정합니다. 비교용으로 Azure OpenAI
+  `text-embedding-3-large`(1,536차원) 임베딩도 함께 저장해 `model=openai|bge`로 결과를 나란히 볼 수 있습니다.
+- **임베딩 서빙** — BGE-M3는 AKS의 NVIDIA T4 spot 노드에서 vLLM(OpenAI 호환 `/v1/embeddings`)으로 서빙합니다.
 - **영화 그래프** — 같은 카탈로그를 Apache AGE 그래프(감독·배우·장르·비슷한 영화)로 만들어 Cytoscape.js로
   그립니다. 원본이 바뀌면 trigger queue로 바뀐 영화만 그래프에 반영합니다.
 - **관측** — AKS 자동 계측(Application Insights Java agent)과 Micrometer 지표를 Managed Grafana로 봅니다.
@@ -25,7 +27,7 @@
 |---|---|
 | 앱 | Spring Boot 4.1.2, Java 25, Thymeleaf, Gradle Kotlin DSL |
 | DB | Azure HorizonDB(PostgreSQL 17, 미리 보기), `vector`·`pg_diskann`·`age` 확장 |
-| 임베딩 | Azure OpenAI `text-embedding-3-large`(1,536차원, Microsoft Entra 인증) |
+| 임베딩 | `dragonkue/BGE-m3-ko`(1,024차원, vLLM 0.32 · `Standard_NC4as_T4_v3` spot), 비교용 Azure OpenAI `text-embedding-3-large`(1,536차원, Microsoft Entra 인증) |
 | 실행 환경 | AKS, Application Gateway for Containers, cert-manager, Key Vault CSI driver |
 | 관측 | Application Insights, Azure Managed Grafana |
 | 데이터 | Wikidata·Wikipedia 영화 약 480편, TMDB 포스터 |
@@ -38,11 +40,12 @@
 | `src/` | 앱 소스. 검색·그래프는 `discover/`, Entra ID 로그인은 `member/`·`config/` |
 | `db/` | DB, schema, 벡터 index, 그래프 생성과 동기화 SQL(`00` → `40` 순서) |
 | `data/` | 카탈로그 빌더, TMDB 보강, 문서 임베딩 스크립트(Python 표준 라이브러리) |
-| `k8s/` | namespace, 자동 계측, 앱, Key Vault secret, HTTPS 공개, 부하 manifest |
+| `k8s/` | namespace, 자동 계측, 앱, Key Vault secret, HTTPS 공개, 부하, vLLM 임베딩 서버 manifest |
 | `loadgen/`, `grafana/` | 합성 사용자 부하, Grafana 대시보드 JSON |
 | `agent-init/` | Application Insights Java agent 3.7.10 init image |
+| `azure.yaml`, `infra/`, `hooks/` | azd 구성, Bicep, 배포 hook |
 | `docs/` | [배포 절차](docs/deploy.md), [설계 메모](docs/design-notes.md) |
-| `.github/workflows/` | `ci.yml`(테스트·이미지 빌드 확인), `release.yml`(태그 → GHCR 게시) |
+| `.github/workflows/` | `ci.yml`(테스트·이미지 빌드, Bicep·hook 검사), `release.yml`(태그 → 앱·agent 이미지 GHCR 게시) |
 
 ## 로컬 테스트
 
@@ -52,16 +55,24 @@ JDK 25가 필요합니다. 테스트는 H2 DB로 실행하므로 Azure 리소스
 ./gradlew test
 ```
 
-## Azure 배포 흐름
+## Azure 배포
 
-약 90분이 걸리고 유료 자원을 씁니다. 명령 전체는 [docs/deploy.md](docs/deploy.md)에 있습니다.
+Azure Developer CLI(`azd`)로 리소스 생성, 앱 배포, 카탈로그 적재와 정리를 재현합니다. 유료 자원을 쓰므로 끝나면
+`azd down --purge`로 지웁니다. 준비물, 선택 환경 값과 단계별 동작은 [docs/deploy.md](docs/deploy.md)에 있습니다.
 
-1. HorizonDB cluster와 pool을 만들고 parameter group으로 `vector`·`pg_diskann`·`age`를 허용합니다.
-2. Azure OpenAI, AKS, ACR, Application Insights, Managed Grafana와 workload identity를 만듭니다.
-3. DB를 준비하고 Key Vault 비밀값과 Microsoft Entra ID 앱을 등록합니다.
-4. 릴리스 이미지를 `az acr import`로 ACR에 복사하고 AKS에 배포합니다.
-5. 카탈로그를 적재하고 임베딩, 벡터 index, 그래프를 만듭니다.
-6. Application Gateway for Containers와 cert-manager로 HTTPS를 열고 Grafana 대시보드를 올립니다.
+```bash
+azd auth login && az login
+azd env new movielog --location koreacentral
+azd env set APP_HOST movielog.example.com   # optional: HTTPS and Microsoft Entra ID sign-in
+azd up
+azd down --purge
+```
+
+| 단계 | 하는 일 |
+|---|---|
+| Bicep(`infra/`) | AKS, ACR, Azure OpenAI, Key Vault, Application Insights, Managed Grafana, managed identity와 역할 |
+| `postprovision` hook | Azure HorizonDB(미리 보기, Bicep 형식 없음), DB와 schema, Key Vault secret, Entra ID 앱, Kubernetes 기본 구성 |
+| `postdeploy` hook | GHCR 릴리스 이미지 `az acr import`, 배포, 카탈로그 적재·임베딩·벡터 index·그래프, 대시보드, HTTPS |
 
 ## 화면과 API
 
@@ -80,8 +91,10 @@ JDK 25가 필요합니다. 테스트는 H2 DB로 실행하므로 Azure 리소스
 
 ## 릴리스 절차
 
-1. 변경을 PR로 `main`에 merge합니다. PR마다 CI와 Copilot 코드 리뷰를 거칩니다.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`로 태그를 올리면 release workflow가 이미지를 GHCR에 게시합니다.
+1. 변경을 PR로 `main`에 merge합니다. PR마다 CI와 Copilot 코드 리뷰를 거칩니다. 릴리스 PR에서는 `hooks/lib.sh`의
+   `MOVIELOG_VERSION`을 새 버전으로 올립니다.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`로 태그를 올리면 release workflow가 앱 이미지와 agent init image를 GHCR에
+   게시합니다.
 3. workflow 요약의 `ref`, `commit`, `image` 값을 문서 레포 `sample.yml`에 옮기고 submodule을 같은 commit으로 맞춥니다.
 
 ## 데이터 출처

@@ -1,320 +1,143 @@
 # Azure 배포 절차
 
-[README](../README.md)의 배포 흐름을 명령으로 옮긴 문서입니다. HorizonDB·AKS·Azure OpenAI·Managed Grafana를 만들고
-카탈로그를 적재하기까지 약 90분이 걸리며 유료 자원을 쓰므로, 끝나면 [정리](#11-정리)합니다.
+[README](../README.md)의 배포를 Azure Developer CLI(`azd`)로 재현합니다. `azd up` 한 번으로 리소스를 만들고, 앱을
+배포하고, 카탈로그를 적재하고, `azd down --purge`로 모두 지웁니다. HorizonDB·AKS(GPU spot 노드 포함)·Azure OpenAI·Managed Grafana를 쓰는
+유료 실습이므로 끝나면 정리합니다.
 
-필요한 도구: Azure CLI(`horizondb` 확장), `kubectl`, `helm`, `envsubst`, `jq`, `psql` 15 이상, Python 3.
+## 준비물
 
-## 1. HorizonDB cluster
+| 항목 | 내용 |
+|---|---|
+| 권한 | 구독 Owner. Bicep이 역할을 할당하고 `preprovision`이 미리 보기 기능과 resource provider를 등록합니다. |
+| 도구 | `azd`, Azure CLI 2.89 이상, `kubectl`, `envsubst`(gettext), `jq`, `psql` 15 이상, Python 3, `openssl`, `curl`. HTTPS를 쓰면 `helm`도 필요합니다. Azure CLI `horizondb`·`amg` 확장은 hook이 설치합니다. |
+| 할당량 | 지역의 `standardDSv5Family` vCPU 8개, spot vCPU는 GPU 노드 크기의 vCPU 수만큼(기본 `Standard_NC4as_T4_v3`은 4개, `GPU_VM_SIZE`를 바꾸면 그 크기의 vCPU 수), Azure OpenAI `GlobalStandard` `text-embedding-3-large` 150K TPM. spot VM은 VM 계열과 상관없이 지역의 spot vCPU 할당량을 쓰므로 GPU 계열 할당량이 0이어도 만들 수 있습니다. |
 
-HorizonDB API `2026-10-01-preview`(Azure CLI `horizondb` 확장 1.0.0b9) 기준입니다.
-cluster를 만든 뒤 pool, parameter group, 관리자 인증, 방화벽을 따로 만듭니다.
+## 환경 값
 
-```bash
-RG=rg-movielog-horizondb; LOC=koreacentral
-HZ="<horizondb-cluster>"; ACR="<acr-name>"; AOAI="<openai-name>"; GRAFANA="<grafana-name>"
-SID="$(az account show --query id -o tsv)"
-RID="/subscriptions/$SID/resourceGroups/$RG/providers/Microsoft.HorizonDb"
-API=api-version=2026-10-01-preview
+모두 선택 값입니다. `azd env set <이름> <값>`으로 넣고, TMDB 토큰처럼 저장하지 않을 값은 셸 환경 변수로만 넘깁니다.
 
-az extension add --name horizondb
-az group create -n $RG -l $LOC
-az horizondb cluster create -g $RG -n "$HZ" -l $LOC --version 17 \
-  --public-access Enabled --geo-redundancy Disabled
+| 이름 | 용도 |
+|---|---|
+| `APP_HOST` | 앱 공개 주소(예: `movielog.example.com`). 넣으면 Application Gateway for Containers와 Let's Encrypt로 HTTPS를 열고 Microsoft Entra ID 로그인 앱을 등록합니다. 없으면 `kubectl port-forward`로 접속합니다. |
+| `DNS_ZONE_NAME`, `DNS_ZONE_RESOURCE_GROUP`, `DNS_ZONE_SUBSCRIPTION_ID` | `APP_HOST`가 속한 Azure DNS zone. 넣으면 hook이 CNAME을 만들고 `azd down` 때 지웁니다. 없으면 hook이 안내하는 CNAME을 직접 만듭니다. |
+| `TMDB_API_TOKEN` | TMDB API Read Access Token. 셸 환경 변수로 넘기면 포스터를 채우고 앱의 TMDB 연동 키로 Key Vault에 넣습니다. |
+| `OMDB_API_KEY` | Rotten Tomatoes 점수용 OMDb 키 |
+| `ENABLE_LOADGEN` | `false`이면 부하 생성기를 배포하지 않습니다(기본 `true`). |
+| `GATEWAY_ENABLED` | `false`이면 Gateway API와 AGFC add-on을 켜지 않습니다(기본 `true`). |
+| `GPU_VM_SIZE` | 임베딩 서버용 spot GPU 노드 크기(기본 `Standard_NC4as_T4_v3`). `preprovision`이 지역에서 제공되는지 확인합니다. A10(`Standard_NV36ads_A10_v5`)이나 A100(`Standard_NC24ads_A100_v4`)이 제공되는 지역에서는 바꿔 쓸 수 있습니다. |
+| `MOVIELOG_VERSION`, `APP_IMAGE_SOURCE`, `AGENT_IMAGE_SOURCE`, `VLLM_IMAGE_SOURCE` | 배포할 앱 버전과 이미지 위치. 기본값은 이 checkout의 릴리스 버전과 GHCR 이미지입니다. |
 
-# Parameter group: extensions allowlist and AGE preload.
-az rest --method put --uri "https://management.azure.com$RID/parameterGroups/pg-movielog-age?$API" --body \
-  "{\"location\":\"$LOC\",\"properties\":{\"postgreSqlVersion\":\"17\",\"parameters\":[
-    {\"name\":\"azure.extensions\",\"value\":\"vector,pg_diskann,age\"},
-    {\"name\":\"shared_preload_libraries\",\"value\":\"age\"}]}}"
-
-# Pool creation accepts only the default parameter group; assign the custom one afterwards.
-az horizondb cluster pool create -g $RG --cluster-name "$HZ" -n pool-01 \
-  --compute-processor Intel --compute-generation 1 --v-cores 4 --node-count 1 --high-availability-mode Disabled
-az rest --method patch --uri "https://management.azure.com$RID/clusters/$HZ/pools/pool-01?$API" --body \
-  "{\"properties\":{\"parameterGroup\":{\"parameterGroupResourceId\":\"$RID/parameterGroups/pg-movielog-age\",\"applyMethod\":\"Immediate\"}}}"
-
-# Administrator (password authentication) and firewall rules for the operator and AKS egress.
-# jq escapes quotes and backslashes in the password.
-az rest --method put --uri "https://management.azure.com$RID/clusters/$HZ/authentications/passwordMethod?$API" \
-  --body "$(jq -nc --arg password "$HZ_ADMIN_PASSWORD" \
-    '{properties: {state: "Enabled", administratorLogin: "movielogadmin", administratorLoginPassword: $password}}')"
-az rest --method put --uri "https://management.azure.com$RID/clusters/$HZ/pools/pool-01/firewallRules/client?$API" \
-  --body "{\"properties\":{\"startIpAddress\":\"$MY_IP\",\"endIpAddress\":\"$MY_IP\"}}"
-HZ_HOST="$(az rest --method get --uri "https://management.azure.com$RID/clusters/$HZ/endpoints?$API" \
-  --query "value[?properties.role=='ReadWrite'].properties.fullyQualifiedDomainName | [0]" -o tsv)"
-```
-
-`passwordMethod`와 cluster 응답에는 `provisioningState`가 없을 수 있으므로
-`administratorLogin`이 응답에 나타나는지로 완료를 확인합니다.
-
-## 2. Azure OpenAI·AKS·모니터링 리소스
-
-Azure OpenAI, AKS(workload identity·app monitoring), 모니터링 리소스를 만듭니다.
+## 실행
 
 ```bash
-az cognitiveservices account create -g $RG -n "$AOAI" -l $LOC --kind OpenAI --sku S0 --custom-domain "$AOAI"
-# Keyless: only Microsoft Entra tokens (workload identity, az login) can call the account.
-az resource update --ids "$(az cognitiveservices account show -g $RG -n "$AOAI" --query id -o tsv)" \
-  --set properties.disableLocalAuth=true
-az cognitiveservices account deployment create -g $RG -n "$AOAI" --deployment-name text-embedding-3-large \
-  --model-name text-embedding-3-large --model-version 1 --model-format OpenAI --sku-name GlobalStandard --sku-capacity 150
-az monitor log-analytics workspace create -g $RG -n law-movielog-hz
-az monitor app-insights component create -g $RG -a appi-movielog-hz -l $LOC \
-  --workspace "$(az monitor log-analytics workspace show -g $RG -n law-movielog-hz --query id -o tsv)"
-az acr create -g $RG -n "$ACR" --sku Basic
-az aks create -g $RG -n aks-movielog-hz --node-count 2 --node-vm-size Standard_D4s_v5 \
-  --enable-azure-monitor-app-monitoring --enable-oidc-issuer --enable-workload-identity \
-  --attach-acr "$ACR" --generate-ssh-keys
-az grafana create -g $RG -n "$GRAFANA" --sku-tier Standard
-
-# Workload identity for query embeddings; the operator also needs the role for embed_catalog.py.
-AOAI_ID="$(az cognitiveservices account show -g $RG -n "$AOAI" --query id -o tsv)"
-az identity create -g $RG -n id-movielog-app
-az role assignment create --assignee-object-id "$(az identity show -g $RG -n id-movielog-app --query principalId -o tsv)" \
-  --assignee-principal-type ServicePrincipal --role "Cognitive Services OpenAI User" --scope "$AOAI_ID"
-az role assignment create --assignee-object-id "$(az ad signed-in-user show --query id -o tsv)" \
-  --assignee-principal-type User --role "Cognitive Services OpenAI User" --scope "$AOAI_ID"
-az identity federated-credential create -g $RG --identity-name id-movielog-app -n movielog-sa \
-  --issuer "$(az aks show -g $RG -n aks-movielog-hz --query oidcIssuerProfile.issuerUrl -o tsv)" \
-  --subject system:serviceaccount:movielog:movielog --audiences api://AzureADTokenExchange
+azd auth login
+az login                               # hooks use the Azure CLI
+azd env new movielog --location koreacentral
+azd env set APP_HOST movielog.example.com             # optional: HTTPS and Entra ID sign-in
+azd env set DNS_ZONE_NAME example.com                 # optional: let the hook manage the CNAME
+azd env set DNS_ZONE_RESOURCE_GROUP rg-dns
+read -rs TMDB_API_TOKEN && export TMDB_API_TOKEN      # optional: posters
+azd up
 ```
 
-## 3. DB 준비
+`azd deploy`는 `postdeploy`만 다시 실행해 이미지를 다시 가져오고 rollout합니다. 카탈로그가 이미 있으면 적재는
+건너뜁니다.
 
-AKS outbound IP를 HorizonDB 방화벽에 더하고 DB를 준비합니다.
+## 단계별 동작
 
-```bash
-NRG="$(az aks show -g $RG -n aks-movielog-hz --query nodeResourceGroup -o tsv)"
-EGRESS="$(az network public-ip list -g "$NRG" \
-  --query "[?tags.\"aks-managed-type\"=='aks-slb-managed-outbound-ip'].ipAddress | [0]" -o tsv)"
-az rest --method put --uri "https://management.azure.com$RID/clusters/$HZ/pools/pool-01/firewallRules/aks-egress?$API" \
-  --body "{\"properties\":{\"startIpAddress\":\"$EGRESS\",\"endIpAddress\":\"$EGRESS\"}}"
+| 단계 | 파일 | 동작 |
+|---|---|---|
+| `preprovision` | `hooks/preprovision.sh` | 도구를 확인하고, `AzureMonitorAppMonitoringPreview`·`ManagedGatewayAPIPreview`·`ApplicationLoadBalancerPreview` 기능과 resource provider를 등록합니다. 운영자 공인 IP와 DB 비밀번호 두 개를 azd 환경(`.azure/<env>/.env`, 커밋하지 않음)에 둡니다. |
+| provision | `infra/main.bicep`, `infra/resources.bicep` | resource group, Log Analytics, Application Insights, ACR, Azure OpenAI(키 인증 끔)와 임베딩 배포, AKS(workload identity, Key Vault CSI driver, Gateway API·AGFC, 애플리케이션 모니터링 자동 계측)와 NVIDIA GPU spot 노드 풀(AKS가 driver·device plugin·DCGM exporter를 관리), 앱 managed identity와 federated credential, Key Vault(공용 접근 끔), Managed Grafana와 역할 할당 |
+| `postprovision` | `hooks/postprovision.sh` | HorizonDB parameter group·cluster·pool·관리자·방화벽, `movielog` DB와 schema, Key Vault private endpoint와 secret, Entra ID 앱 등록(`APP_HOST`), namespace·instrumentation·secret |
+| `postdeploy` | `hooks/postdeploy.sh`, `hooks/https.sh` | GHCR 릴리스 이미지·agent init image·vLLM 이미지를 `az acr import`, GPU 노드에 vLLM(bge-m3-ko) 기동, Deployment 적용, 관리형 agent가 3.7.9 미만이면 3.7.10 init image로 전환, 첫 실행에서 카탈로그 적재와 두 모델의 임베딩·DiskANN index·AGE 그래프(비어 있는 bge 임베딩이 있으면 채운 뒤 그래프를 다시 만듦), replica 2개, 부하 생성기, Grafana dashboard, HTTPS(`APP_HOST`) |
+| `predown` | `hooks/predown.sh` | resource group 밖에 만든 DNS 레코드와 Entra ID 앱 등록을 지웁니다. |
 
-export PGHOST="$HZ_HOST" PGUSER=movielogadmin PGPASSWORD="$HZ_ADMIN_PASSWORD" PGSSLMODE=require
-# 00-database.sql reads APP_DB_PASSWORD from the environment (psql 15+), not from the command line.
-APP_DB_PASSWORD="$APP_DB_PASSWORD" psql -d postgres -f db/00-database.sql
-PGDATABASE=movielog psql -f db/10-schema.sql
-```
+### HorizonDB를 hook으로 만드는 이유
 
-## 4. Key Vault 비밀값과 Microsoft Entra ID 앱
+Azure HorizonDB는 미리 보기이며 Bicep에 형식 정의가 없습니다(`BCP081`). 또한 pool을 만들 때는 기본 parameter
+group만 받으므로 사용자 parameter group은 만든 뒤 따로 지정해야 하고, 관리자 인증 응답에는 `provisioningState`가
+없을 수 있어 `administratorLogin`이 나타나는지로 완료를 확인합니다. 그래서 `postprovision`이 Azure CLI
+`horizondb` 확장과 ARM REST API(`2026-10-01-preview`)로 만들고, 다시 실행해도 같은 결과가 되도록 있는 리소스는
+건너뜁니다. HorizonDB는 다른 리소스와 같은 resource group에 있으므로 `azd down`이 함께 지웁니다.
 
-앱 비밀값을 Key Vault에 넣고 Microsoft Entra ID 앱을 등록합니다. 공개 주소(`APP_HOST`)를 먼저 정하면
-redirect URI를 미리 등록할 수 있습니다. 값은 파일 권한 600인 임시 파일로만 다루고 명령줄에 쓰지 않습니다.
+### bge-m3-ko 임베딩 서버
 
-```bash
-# APP_HOST: a new name in a DNS zone you own, for example movielog.example.com.
-export APP_HOST=movielog.example.com
-export KEYVAULT_NAME="<keyvault-name>" KEYVAULT_TENANT_ID="$(az account show --query tenantId -o tsv)"
-az keyvault create -g $RG -n "$KEYVAULT_NAME" -l $LOC --enable-rbac-authorization true
-KV_ID="$(az keyvault show -n "$KEYVAULT_NAME" --query id -o tsv)"
-az role assignment create --assignee-object-id "$(az identity show -g $RG -n id-movielog-app --query principalId -o tsv)" \
-  --assignee-principal-type ServicePrincipal --role "Key Vault Secrets User" --scope "$KV_ID"
+`k8s/40-embeddings-vllm.yaml`은 vLLM OpenAI 호환 서버를 GPU spot 노드에 띄웁니다. 모델은 commit을 고정한
+`dragonkue/BGE-m3-ko`이며 `--runner=pooling`, CLS pooling, `float16`(T4는 bfloat16 미지원)으로 실행합니다. 앱은
+`EMBEDDINGS_BGE_URL`(클러스터 내부 Service)로 `/v1/embeddings`를 호출하고, `postdeploy`는 port-forward로
+`data/embed_catalog.py --model bge`를 실행해 `catalog.movie_docs.embedding_bge vector(1024)`를 채웁니다.
 
-# Private endpoint in the AKS VNet (public network access was disabled by policy in the lab subscription).
-NRG="$(az aks show -g $RG -n aks-movielog-hz --query nodeResourceGroup -o tsv)"
-VNET_ID="$(az network vnet list -g "$NRG" --query "[0].id" -o tsv)"
-az network private-dns zone create -g $RG -n privatelink.vaultcore.azure.net
-az network private-dns link vnet create -g $RG -z privatelink.vaultcore.azure.net -n aks-vnet-link -v "$VNET_ID" -e false
-az network private-endpoint create -g $RG -n "pe-$KEYVAULT_NAME" -l $LOC --subnet "$VNET_ID/subnets/aks-subnet" \
-  --private-connection-resource-id "$KV_ID" --group-ids vault --connection-name kv-conn
-az network private-endpoint dns-zone-group create -g $RG --endpoint-name "pe-$KEYVAULT_NAME" -n default \
-  --private-dns-zone privatelink.vaultcore.azure.net --zone-name vault
-az aks enable-addons -g $RG -n aks-movielog-hz --addons azure-keyvault-secrets-provider
+| 항목 | 2026-11-15 실습 값 |
+|---|---|
+| 노드 | `Standard_NC4as_T4_v3` spot 1대(autoscaler min 1·max 1), taint `sku=gpu:NoSchedule` |
+| 기동 | 노드 준비 뒤 이미지·모델 내려받기와 warm-up까지 약 6분 |
+| 질의 1건 | 평균 약 0.1–0.2초(port-forward 경유 curl), 앱 Timer 평균 22 ms |
+| 문서 479편 | 약 1분 30초(32건씩 배치) |
 
-# Single-tenant Entra ID app; the client secret goes straight to a 600 file.
-export ENTRA_TENANT_ID="$KEYVAULT_TENANT_ID"
-export ENTRA_CLIENT_ID="$(az ad app create --display-name movielog-horizondb-lab --sign-in-audience AzureADMyOrg \
-  --web-redirect-uris "https://$APP_HOST/login/oauth2/code/entra" --query appId -o tsv)"
-az ad sp create --id "$ENTRA_CLIENT_ID"
-umask 077; SECRETS="$(mktemp -d)"
-az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
-  --end-date "$(date -u -d '+180 days' +%Y-%m-%d)" --query password -o tsv | tr -d '\n' > "$SECRETS/entra-client-secret"
-# Put the TMDB API Read Access Token and the OMDb key into $SECRETS/tmdb-api-key and $SECRETS/omdb-api-key.
-for name in tmdb-api-key omdb-api-key entra-client-secret; do
-  jq -nc --rawfile v "$SECRETS/$name" '{properties: {value: $v, contentType: "text/plain"}}' > "$SECRETS/body.json"
-  az rest --method put --uri "https://management.azure.com$KV_ID/secrets/$name?api-version=2023-07-01" \
-    --body @"$SECRETS/body.json" --query name -o tsv
-done
-rm -rf "$SECRETS"
-```
+spot VM이 회수되면 autoscaler가 새 spot VM을 요청하고, 그 사이 `model=bge` 검색은 503을 돌려줍니다. 앱의
+`EMBEDDING_DEFAULT_MODEL`을 `openai`로 바꾸면 Azure OpenAI로 계속 검색할 수 있습니다.
 
-## 5. 앱 배포
+### Key Vault 접근
 
-앱을 배포합니다. 첫 배포는 replica 1개로 Hibernate가 schema를 만들게 합니다.
+실습 구독은 Azure Policy가 Key Vault 공용 네트워크 접근을 끄므로 Bicep도 처음부터 끈 상태로 만들고,
+`postprovision`이 AKS 관리형 VNet에 private endpoint와 `privatelink.vaultcore.azure.net` private DNS zone을 둡니다.
+운영자는 Key Vault data plane 대신 ARM `Microsoft.KeyVault/vaults/secrets`로 값을 넣습니다. 값이 없는 키는 빈
+문자열로 두며 앱은 빈 키를 설정되지 않은 것으로 다룹니다.
 
-```bash
-ACR_SERVER="$(az acr show -n "$ACR" --query loginServer -o tsv)"
-# Released image pinned by digest: the image value printed by the release workflow (also in the docs sample.yml).
-VERSION=2.6.5  # release to deploy
-IMAGE="ghcr.io/hellices/sample-movielog-horizondb:$VERSION@sha256:<digest>"
-az acr import --name "$ACR" --source "${IMAGE%%:*}@${IMAGE#*@}" --image "movielog:$VERSION" --force
-az acr build -r "$ACR" -t observability/applicationinsights-agent:3.7.10 --platform linux/amd64 agent-init
-az aks get-credentials -g $RG -n aks-movielog-hz
+## HTTPS와 Microsoft Entra ID 로그인
 
-export MI_CLIENT_ID="$(az identity show -g $RG -n id-movielog-app --query clientId -o tsv)"
-export AZURE_OPENAI_ENDPOINT="https://$AOAI.openai.azure.com/"
-export APP_IMAGE="$ACR_SERVER/movielog:$VERSION"
-export APPLICATIONINSIGHTS_CONNECTION_STRING="$(az monitor app-insights component show \
-  -g $RG -a appi-movielog-hz --query connectionString -o tsv)"
-envsubst < k8s/00-namespace.yaml | kubectl apply -f -
-envsubst < k8s/24-keyvault-secrets.yaml | kubectl apply -f -
-kubectl create secret generic movielog-db -n movielog \
-  --from-literal=url="jdbc:postgresql://$HZ_HOST:5432/movielog?sslmode=require" \
-  --from-literal=username=movielog --from-literal=password="$APP_DB_PASSWORD"
-envsubst < k8s/10-instrumentation.yaml | kubectl apply -f -
-envsubst < k8s/20-movielog.yaml | kubectl apply -f -
-kubectl rollout status deploy/movielog -n movielog
-```
-
-주입된 agent가 3.7.9 미만이면 `k8s/21-agent-3.7.10.patch.yaml` 주석의 두 단계로
-3.7.10 init image로 바꿉니다. 이후 이미지만 바꿀 때는 patch가 유지되도록
-`kubectl set image`를 씁니다.
-
-## 6. 카탈로그 적재·임베딩·그래프
-
-카탈로그를 적재하고 임베딩·index·그래프를 만듭니다. 영화 약 480편 기준으로
-`build_catalog.py`는 약 8–11분, `catalog.sql` 적재와 임베딩은 각각 약 3–4분,
-TMDB 보강은 약 2분, 그래프 생성은 약 6초 걸렸습니다. Wikidata·Wikipedia에는 포스터가 없으므로
-`enrich_tmdb.py`가 TMDB API Read Access Token(`TMDB_API_TOKEN`)으로 포스터 경로를 채웁니다.
-토큰은 셸 history에 남지 않도록 `read -rs`로 입력합니다.
-
-```bash
-python3 data/build_catalog.py
-export PGDATABASE=movielog
-psql -q -f data/out/catalog.sql
-read -rs TMDB_API_TOKEN && export TMDB_API_TOKEN
-python3 data/enrich_tmdb.py
-psql -q -f data/out/tmdb.sql
-AZURE_OPENAI_ENDPOINT="https://$AOAI.openai.azure.com/" python3 data/embed_catalog.py
-psql -f db/20-vector-index.sql
-psql -f db/30-graph.sql
-psql -f db/40-graph-sync.sql
-```
-
-## 7. 부하
-
-부하를 켭니다.
-
-```bash
-kubectl scale deploy/movielog -n movielog --replicas=2
-kubectl create configmap loadgen -n movielog --from-file=loadgen/loadgen.py
-kubectl apply -f k8s/30-loadgen.yaml
-```
-
-## 8. HTTPS 공개(Application Gateway for Containers)
-
-Application Gateway for Containers로 앱을 커스텀 도메인의 HTTPS로 공개합니다. 회원 가입과
-form login이 있어 HTTP만 열면 비밀번호와 session cookie가 평문으로 전달되므로, HTTP listener는
+`APP_HOST`를 넣으면 회원 가입과 form login의 비밀번호와 session cookie가 평문으로 오가지 않도록 HTTP listener는
 Let's Encrypt HTTP-01 challenge에만 응답하고 나머지 요청은 HTTPS로 301 redirect합니다.
 
-- **DNS** — 소유한 DNS zone에 이미 쓰는 이름과 겹치지 않는 host를 정하고, CNAME을 Gateway 주소로
-  향하게 합니다. 실습은 Azure DNS zone의 새 하위 이름 하나를 썼습니다.
-- **NSG** — AKS 관리형 VNet의 `aks-appgateway` 서브넷 NSG가 association에 적용되므로 frontend
-  포트(TCP 80, 443)를 Internet에서 허용하는 규칙이 필요합니다. AGFC에서 Pod로 가는 트래픽은
-  VNet 내부라 노드 NSG는 바꾸지 않습니다.
-- **조직 보안 자동화** — 실습 구독에서는 모든 포트를 여는 Internet 허용 규칙을 만든 지 약 25분 뒤
-  조직 보안 자동화(다른 tenant의 app)가 NSG를 다시 써서 규칙을 지웠고, 그 뒤 frontend 접속이
-  시간 초과됐습니다. 포트를 지정한 규칙은 유지됐습니다.
-
-```bash
-# Requires the ManagedGatewayAPIPreview and ApplicationLoadBalancerPreview features (Microsoft.ContainerService).
-az aks update -g $RG -n aks-movielog-hz --enable-gateway-api --enable-application-load-balancer
-NRG="$(az aks show -g $RG -n aks-movielog-hz --query nodeResourceGroup -o tsv)"
-export ALB_SUBNET_ID="$(az network vnet list -g "$NRG" \
-  --query "[].subnets[?name=='aks-appgateway'][].id | [0]" -o tsv)"
-ALB_NSG="$(az network vnet subnet show --ids "$ALB_SUBNET_ID" --query networkSecurityGroup.id -o tsv)"
-for rule in http:200:80 https:210:443; do
-  IFS=: read -r name priority port <<< "$rule"
-  az network nsg rule create -g "$NRG" --nsg-name "${ALB_NSG##*/}" -n "allow-agfc-frontend-$name" \
-    --priority "$priority" --direction Inbound --access Allow --protocol Tcp \
-    --source-address-prefixes Internet --source-port-ranges '*' \
-    --destination-address-prefixes '*' --destination-port-ranges "$port"
-done
-
-# cert-manager with Gateway API support (Learn: Cert-manager and Let's Encrypt with AGFC - Gateway API).
-helm install cert-manager oci://quay.io/jetstack/charts/cert-manager --version v1.19.3 \
-  --namespace cert-manager --create-namespace \
-  --set config.enableGatewayAPI=true --set crds.enabled=true --wait
-
-# APP_HOST was set with the Entra ID redirect URI above.
-envsubst '$APP_HOST $ALB_SUBNET_ID' < k8s/26-agfc.yaml | kubectl apply -f -
-GATEWAY_FQDN="$(kubectl get gateway movielog -n movielog -o jsonpath='{.status.addresses[0].value}')"
-# Azure DNS example; DNS_ZONE_RG and DNS_ZONE are the resource group and name of your zone.
-az network dns record-set list -g "$DNS_ZONE_RG" -z "$DNS_ZONE" --query "[].name" -o tsv  # pick an unused name
-az network dns record-set cname set-record -g "$DNS_ZONE_RG" -z "$DNS_ZONE" \
-  -n "${APP_HOST%%.$DNS_ZONE}" -c "$GATEWAY_FQDN" --ttl 300
-envsubst '$APP_HOST' < k8s/27-tls.yaml | kubectl apply -f -
-kubectl wait certificate/movielog-tls -n movielog --for=condition=Ready --timeout=5m
-```
-
-실습에서는 `Certificate` 적용 후 약 45초 만에 Let's Encrypt 인증서가 발급됐고, 두 listener가
-모두 `Programmed`가 됐습니다. 확인은 다음처럼 합니다.
+- **NSG** — AKS 관리형 VNet의 `aks-appgateway` 서브넷 NSG가 association에 적용되므로 hook이 frontend 포트(TCP 80,
+  443)만 Internet에서 허용합니다. 실습 구독에서는 모든 포트를 여는 규칙을 조직 보안 자동화가 약 25분 뒤 지웠고,
+  포트를 지정한 규칙은 유지됐습니다.
+- **인증서** — cert-manager(Gateway API 지원)가 발급하고 만료 전에 갱신합니다. 실습에서는 `Certificate` 적용 후 약
+  45초 만에 발급됐습니다.
+- **전달 헤더** — AGFC가 `x-forwarded-proto`를 넘기고 `aks` profile은 `server.forward-headers-strategy=native`를
+  쓰므로 앱의 redirect와 Entra ID `redirect_uri`는 `https://` 주소가 되고 `JSESSIONID`·`XSRF-TOKEN` cookie에는
+  `Secure`가 붙습니다. listener에 hostname을 지정했으므로 AGFC 기본 FQDN으로 들어온 요청은 404를 받습니다.
+- **Entra ID 앱** — single-tenant 앱을 `movielog-<env>` 이름으로 등록하고 client secret(1년)을 Key Vault에 넣습니다.
+  로그인 화면의 **Microsoft Entra ID로 로그인**은 `/oauth2/authorization/entra`에서 Entra ID authorize endpoint로
+  넘어갑니다.
+- **session 고정** — `RoutePolicy`의 `managed-cookie`가 `AGCAffinity` cookie로 로그인 session을 한 Pod에 묶습니다.
 
 ```bash
 curl -sI "http://$APP_HOST/" | grep -iE '^HTTP|^location'     # 301 -> https://$APP_HOST/
 curl -sv -o /dev/null "https://$APP_HOST/" 2>&1 | grep issuer # O=Let's Encrypt
-curl -sI "https://$APP_HOST/reviews/new" | grep -i location   # https://$APP_HOST/login
-```
-
-AGFC는 백엔드에 `x-forwarded-proto`를 넘기고 Spring Boot는 Kubernetes에서 이 헤더를 따르므로,
-앱이 만드는 redirect는 `https://` 주소가 되고 `JSESSIONID`·`XSRF-TOKEN` cookie에는 `Secure`가
-붙었습니다. listener에 hostname을 지정했으므로 AGFC 기본 FQDN으로 들어온 요청은 404를 받습니다.
-cert-manager는 만료 전에 인증서를 자동으로 갱신합니다.
-
-## 9. Microsoft Entra ID 로그인 확인
-
-HTTPS가 준비되면 Microsoft Entra ID 로그인을 확인합니다. 로그인 화면의 **Microsoft Entra ID로 로그인**은
-`/oauth2/authorization/entra`에서 Entra ID authorize endpoint로 넘어갑니다. 실습에서는 redirect의
-`client_id`, `redirect_uri`(`https://$APP_HOST/login/oauth2/code/entra`), `scope=openid profile`, `state`·`nonce`와
-Entra ID 로그인 화면(이메일 입력)까지 브라우저로 확인했고, 기존 아이디·비밀번호 가입과 로그인도 그대로
-동작했습니다.
-
-```bash
 curl -s -o /dev/null -w '%{redirect_url}\n' "https://$APP_HOST/oauth2/authorization/entra"
 ```
 
-이미 실행 중인 앱을 Entra ID 로그인이 있는 이미지로 바꾸면 Hibernate `ddl-auto=update`가 `members`에
-`external_id` 열을 더합니다. 실습에서는 이 순간 아직 남아 있던 이전 Pod의 회원가입 INSERT 7건이 약 1초 동안
-`cached plan must not change result type`으로 실패했고, 이전 Pod가 내려간 뒤에는 다시 나지 않았습니다.
-
-`RoutePolicy`의 `managed-cookie`는 gateway가 `AGCAffinity` cookie를 첫 응답에 붙여
-로그인 session이 한 Pod에 머물게 합니다. 실습에서 가입·로그인 뒤 인증이 필요한 리뷰 작성
-10건이 모두 성공했고, HTTPS 전환 뒤에도 가입·로그인이 정상 동작했습니다.
-
-## 10. Grafana dashboard
+## Grafana dashboard
 
 ![MovieLog HorizonDB 의미 검색 Grafana 대시보드](images/grafana-discover-dashboard.png)
 
-`appinsights` 변수에 Application Insights resource ID를 채운 사본을 만들어 올립니다.
-채운 JSON은 커밋하지 않습니다.
-
-```bash
-AIID="$(az monitor app-insights component show -g $RG -a appi-movielog-hz --query id -o tsv)"
-python3 - "$AIID" > /tmp/live.json <<'PY'
-import json, sys
-d = json.load(open("grafana/movielog-horizondb-dashboard.json", encoding="utf-8"))
-for v in d["templating"]["list"]:
-    if v["name"] == "appinsights":
-        v.update(query=sys.argv[1], current={"text": sys.argv[1], "value": sys.argv[1]}, hide=2)
-json.dump(d, sys.stdout, ensure_ascii=False)
-PY
-az grafana dashboard create -g $RG -n "$GRAFANA" --definition @/tmp/live.json --overwrite true
-rm /tmp/live.json
-```
+`postdeploy`가 `grafana/movielog-horizondb-dashboard.json`의 `appinsights` 변수에 Application Insights resource ID를
+채운 사본을 올립니다.
 
 | Micrometer meter | 종류 | tag |
 |---|---|---|
-| `movielog.discover.embedding` | Timer | `kind=query`, `outcome` |
-| `movielog.discover.search`, `movielog.discover.similar` | Timer | `kind=vector`, `outcome` = `found`/`empty`/`error` |
+| `movielog.discover.embedding` | Timer | `kind=query`, `model` = `bge`/`openai`, `outcome` |
+| `movielog.discover.search`, `movielog.discover.similar` | Timer | `kind=vector`, `model`, `outcome` = `found`/`empty`/`error` |
 | `movielog.discover.graph` | Timer | `kind` = `movie`/`results`, `outcome` |
 | `movielog.discover.rejected` | Counter | 요청률 한도로 Azure OpenAI 호출 전에 거부한 의미 검색 |
 
-## 11. 정리
+## 운영 메모
 
-DNS 레코드는 실습 resource group 밖의 zone에 있으므로 따로 지웁니다.
+- **에이전트 버전** — Micrometer 지표를 Application Insights로 보내려면 Java agent 3.7.9 이상이 필요합니다.
+  관리형 주입이 더 낮으면 `postdeploy`가 `k8s/21-agent-3.7.10.patch.yaml`의 두 단계로 3.7.10 init image로 바꿉니다.
+  바꾼 뒤의 재배포는 이미지만 바꾸므로 manifest의 다른 변경을 반영하려면 주석의 `kubectl replace` 절차를 따릅니다.
+- **schema 변경** — 이미 실행 중인 앱을 새 entity 열이 있는 이미지로 바꾸면 Hibernate `ddl-auto=update`가 열을
+  더하는 순간 이전 Pod의 INSERT가 `cached plan must not change result type`으로 약 1초 동안 실패할 수 있습니다.
+- **클러스터 자동 중지** — 실습 구독에서는 조직 자동화가 자정 무렵 AKS를 중지했습니다. 다시 볼 때는
+  `az aks start`로 시작합니다.
+
+## 정리
 
 ```bash
-az network dns record-set cname delete -g "$DNS_ZONE_RG" -z "$DNS_ZONE" -n "${APP_HOST%%.$DNS_ZONE}" --yes
-az group delete -n "$RG" --yes --no-wait
+azd down --purge
 ```
+
+`predown`이 DNS 레코드와 Entra ID 앱 등록을 지운 뒤 azd가 resource group을 지우고, `--purge`가 soft-delete된
+Key Vault와 Azure OpenAI 계정을 영구 삭제합니다.

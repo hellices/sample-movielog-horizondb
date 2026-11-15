@@ -13,6 +13,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
+import org.jspecify.annotations.Nullable;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -25,22 +26,26 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 class DiscoverApiController {
 
+	private static final String MODEL_DESCRIPTION = "임베딩 모델 openai 또는 bge. 생략하면 기본 모델";
+
 	private final DiscoverService discoverService;
 
-	@Operation(summary = "의미 검색", description = "질문을 앱에서 Azure OpenAI로 임베딩하고 HorizonDB에서 코사인 거리로 가까운 영화를 반환합니다. 요청이 많으면 429를 반환합니다.")
+	@Operation(summary = "의미 검색", description = "질문을 앱에서 임베딩 모델(openai: Azure OpenAI text-embedding-3-large, bge: BGE-M3 한국어)로 임베딩하고 HorizonDB에서 코사인 거리로 가까운 영화를 반환합니다. 없거나 설정되지 않은 모델은 400, 요청이 많으면 429를 반환합니다.")
 	@GetMapping("/search")
 	List<MovieHit> search(
 			@Parameter(description = "자연어 질의") @RequestParam @NotBlank @Size(max = DiscoverService.MAX_QUERY_LENGTH) String q,
 			@RequestParam(defaultValue = "12") @Min(1) @Max(DiscoverService.MAX_RESULTS) int limit,
+			@Parameter(description = MODEL_DESCRIPTION) @RequestParam(required = false) @Nullable String model,
 			HttpServletRequest request) {
-		return discoverService.search(q, limit, request.getRemoteAddr());
+		return discoverService.search(q, limit, request.getRemoteAddr(), discoverService.resolveModel(model));
 	}
 
 	@Operation(summary = "비슷한 영화", description = "영화 문서 임베딩이 가까운 순으로 반환합니다.")
 	@GetMapping("/movies/{tmdbId}/similar")
 	List<MovieHit> similar(@PathVariable long tmdbId,
-			@RequestParam(defaultValue = "8") @Min(1) @Max(DiscoverService.MAX_RESULTS) int limit) {
-		return discoverService.similar(tmdbId, limit);
+			@RequestParam(defaultValue = "8") @Min(1) @Max(DiscoverService.MAX_RESULTS) int limit,
+			@Parameter(description = MODEL_DESCRIPTION) @RequestParam(required = false) @Nullable String model) {
+		return discoverService.similar(tmdbId, limit, discoverService.resolveModel(model));
 	}
 
 	@Operation(summary = "영화 주변 그래프", description = "감독·배우·장르·SIMILAR_TO 이웃과 같은 인물의 다른 영화를 반환합니다.")

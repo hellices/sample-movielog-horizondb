@@ -1,6 +1,7 @@
 package com.example.springsample.discover;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,9 +24,10 @@ import org.springframework.transaction.support.TransactionOperations;
 /**
  * Makes movies that members import from TMDB searchable. The catalog load embeds only the movies it knows, so a
  * movie first opened through TMDB search has no {@code catalog.movie_docs} row and never appears in semantic search.
- * This job embeds such movies with the same deployment and document layout as {@code data/build_catalog.py}, taking
- * directors and leading cast from TMDB credits, and stores the credits and genres in the catalog tables. Each movie
- * is one transaction, so a movie is either fully indexed or retried on the next run. Triggers queue the stored rows
+ * This job embeds such movies with every configured {@link EmbeddingModel} and the document layout of
+ * {@code data/build_catalog.py}, taking directors and leading cast from TMDB credits, and stores the credits and
+ * genres in the catalog tables. Each movie is one transaction, so a movie is either fully indexed (every configured
+ * model's column) or retried on the next run. Triggers queue the stored rows
  * for the graph, and {@link MovieGraphSync} applies them right after the run.
  */
 @Configuration(proxyBeanMethods = false)
@@ -37,7 +39,7 @@ class CatalogIndexer {
 
 	private final CatalogIndexRepository repository;
 
-	private final EmbeddingClient embeddings;
+	private final EmbeddingModels embeddings;
 
 	private final TmdbCreditsClient tmdb;
 
@@ -49,7 +51,7 @@ class CatalogIndexer {
 
 	private final int batchSize;
 
-	CatalogIndexer(CatalogIndexRepository repository, EmbeddingClient embeddings, TmdbCreditsClient tmdb,
+	CatalogIndexer(CatalogIndexRepository repository, EmbeddingModels embeddings, TmdbCreditsClient tmdb,
 			QueryCorrector corrector, ObjectProvider<MovieGraphSync> graphSync, TransactionOperations transactions,
 			@Value("${app.discover.indexer.batch-size:20}") int batchSize) {
 		this.repository = repository;
@@ -82,7 +84,7 @@ class CatalogIndexer {
 	 * Without a TMDB key the documents have no people.
 	 */
 	List<Long> indexPending() {
-		if (!embeddings.isEnabled()) {
+		if (embeddings.configured().isEmpty()) {
 			return List.of();
 		}
 		List<Long> indexed = new ArrayList<>();
@@ -114,7 +116,7 @@ class CatalogIndexer {
 		Credits credits;
 		Map<Long, String> wikidataIds = new HashMap<>();
 		String doc;
-		float[] vector;
+		Map<EmbeddingModel, float[]> vectors = new EnumMap<>(EmbeddingModel.class);
 		try {
 			credits = tmdb.isEnabled() ? tmdb.credits(movie.tmdbId()) : Credits.NONE;
 			for (Credit credit : credits.directors()) {
@@ -124,13 +126,15 @@ class CatalogIndexer {
 				tmdb.wikidataId(credit.id()).ifPresent(qid -> wikidataIds.put(credit.id(), qid));
 			}
 			doc = document(movie, credits);
-			vector = embeddings.embed(doc);
+			for (EmbeddingModel model : embeddings.configured()) {
+				vectors.put(model, embeddings.embed(model, doc));
+			}
 		}
 		catch (MovieApiUnavailableException | EmbeddingUnavailableException ex) {
 			logger.warn("Indexing movie {} failed: {}", movie.tmdbId(), ex.getMessage());
 			return null;
 		}
-		repository.insert(movie.tmdbId(), doc, vector);
+		repository.insert(movie.tmdbId(), doc, vectors);
 		repository.saveCredits(movie.tmdbId(), credits, wikidataIds);
 		repository.saveGenres(movie.tmdbId(), movie.genres());
 		return movie.tmdbId();

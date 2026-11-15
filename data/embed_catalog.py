@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""Embed catalog.movie_docs.doc with Azure OpenAI and store the vectors in HorizonDB.
+"""Embed catalog.movie_docs.doc with one embedding model and store the vectors in HorizonDB.
 
-Only rows whose embedding is NULL are processed (new or changed documents); --all re-embeds
-every row, which is required after changing the model or dimensions. Authentication
-uses a Microsoft Entra token from the Azure CLI (role: Cognitive Services OpenAI User), so the
-Azure OpenAI account can keep key authentication disabled. psql must be on PATH; connection
-settings come from the standard PGHOST, PGDATABASE, PGUSER, PGPASSWORD and PGSSLMODE variables.
+--model openai (default) uses Azure OpenAI text-embedding-3-large shortened to 1,536 dimensions and fills the
+embedding column. Authentication uses a Microsoft Entra token from the Azure CLI (role: Cognitive Services OpenAI
+User), so the Azure OpenAI account can keep key authentication disabled.
+
+--model bge uses the Korean BGE-M3 (dragonkue/BGE-m3-ko, 1,024 dimensions) served by an OpenAI-compatible embeddings
+server (vLLM in the sample) at EMBEDDINGS_BGE_URL (/v1/embeddings, no authentication) and fills embedding_bge. The
+request names EMBEDDINGS_BGE_MODEL (default dragonkue/BGE-m3-ko), which must equal the served model name.
+
+Only rows whose column of the selected model is NULL are processed (new or changed documents); --all re-embeds
+every row, which is required after changing the model or dimensions. psql must be on PATH; connection settings come
+from the standard PGHOST, PGDATABASE, PGUSER, PGPASSWORD and PGSSLMODE variables.
 
   AZURE_OPENAI_ENDPOINT=https://<name>.openai.azure.com/ python3 data/embed_catalog.py
+  EMBEDDINGS_BGE_URL=http://localhost:8081 python3 data/embed_catalog.py --model bge
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -25,7 +33,11 @@ DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding
 # text-embedding-3-large is shortened to the vector(1536) column; the app requests the same size.
 DIMENSIONS = 1536
 API_VERSION = "2024-10-21"
+BGE_MODEL = os.environ.get("EMBEDDINGS_BGE_MODEL", "").strip() or "dragonkue/BGE-m3-ko"
+# Inputs per request, the same as the app.
 BATCH = 32
+# Column of catalog.movie_docs and vector size per model; the column name never comes from user input.
+MODELS = {"openai": ("embedding", DIMENSIONS), "bge": ("embedding_bge", 1024)}
 
 
 def psql(*args: str) -> str:
@@ -39,12 +51,11 @@ def token() -> str:
                           text=True).stdout.strip()
 
 
-def embed(endpoint: str, bearer: str, texts: list[str]) -> list[list[float]]:
-    url = f"{endpoint.rstrip('/')}/openai/deployments/{DEPLOYMENT}/embeddings?api-version={API_VERSION}"
-    body = json.dumps({"input": texts, "dimensions": DIMENSIONS}).encode()
+def embed(url: str, headers: dict[str, str], payload: dict) -> list[list[float]]:
+    body = json.dumps(payload).encode()
     for attempt in range(6):
-        request = urllib.request.Request(url, data=body, method="POST", headers={
-            "Authorization": f"Bearer {bearer}", "Content-Type": "application/json"})
+        request = urllib.request.Request(url, data=body, method="POST",
+                                         headers={**headers, "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 data = json.load(response)["data"]
@@ -66,17 +77,30 @@ def sql_text(text: str) -> str:
 
 
 def main() -> int:
-    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--model", choices=sorted(MODELS), default="openai", help="embedding model (default: openai)")
+    parser.add_argument("--all", action="store_true", help="re-embed every row, not only rows without a vector")
+    args = parser.parse_args()
+    column, dimensions = MODELS[args.model]
+    env = "AZURE_OPENAI_ENDPOINT" if args.model == "openai" else "EMBEDDINGS_BGE_URL"
+    endpoint = os.environ.get(env)
     if not endpoint:
-        print("AZURE_OPENAI_ENDPOINT is required", file=sys.stderr)
+        print(f"{env} is required", file=sys.stderr)
         return 2
-    where = "" if "--all" in sys.argv[1:] else " WHERE embedding IS NULL"
+    where = "" if args.all else f" WHERE {column} IS NULL"
     rows = json.loads(psql("-Atc", "SELECT coalesce(json_agg(json_build_object('id', tmdb_id, 'doc', doc)"
                                    " ORDER BY tmdb_id), '[]') FROM catalog.movie_docs" + where))
     print(f"{len(rows)} documents to embed", file=sys.stderr)
     if not rows:
         return 0
-    bearer = token()
+    if args.model == "openai":
+        url = f"{endpoint.rstrip('/')}/openai/deployments/{DEPLOYMENT}/embeddings?api-version={API_VERSION}"
+        headers = {"Authorization": f"Bearer {token()}"}
+        options = {"dimensions": DIMENSIONS}
+    else:
+        url = f"{endpoint.rstrip('/')}/v1/embeddings"
+        headers = {}
+        options = {"model": BGE_MODEL}
     # The file holds partial vectors until psql loads it, so remove it on every exit path.
     fd, path = tempfile.mkstemp(suffix=".sql")
     try:
@@ -84,19 +108,21 @@ def main() -> int:
             out.write("BEGIN;\n")
             for start in range(0, len(rows), BATCH):
                 batch = rows[start:start + BATCH]
-                vectors = embed(endpoint, bearer, [row["doc"] for row in batch])
+                vectors = embed(url, headers, {"input": [row["doc"] for row in batch], **options})
+                if len(vectors) != len(batch) or any(len(vector) != dimensions for vector in vectors):
+                    raise RuntimeError(f"{args.model} returned an unexpected number or size of embeddings")
                 for row, vector in zip(batch, vectors):
                     literal = "[" + ",".join(f"{v:.7g}" for v in vector) + "]"
                     # Matching the embedded text too leaves a row reloaded meanwhile NULL for the next run.
-                    out.write(f"UPDATE catalog.movie_docs SET embedding = '{literal}'::vector, embedded_at = now()"
+                    out.write(f"UPDATE catalog.movie_docs SET {column} = '{literal}'::vector, embedded_at = now()"
                               f" WHERE tmdb_id = {int(row['id'])} AND doc = {sql_text(row['doc'])};\n")
                 print(f"  embedded {min(start + BATCH, len(rows))}/{len(rows)}", file=sys.stderr)
             out.write("COMMIT;\n")
         psql("-q", "-f", path)
     finally:
         os.unlink(path)
-    print(psql("-Atc", "SELECT count(*) || ' documents, ' || count(embedding) || ' embedded' FROM catalog.movie_docs"),
-          end="", file=sys.stderr)
+    print(psql("-Atc", f"SELECT count(*) || ' documents, ' || count({column}) || ' embedded with {args.model}'"
+                       " FROM catalog.movie_docs"), end="", file=sys.stderr)
     return 0
 
 

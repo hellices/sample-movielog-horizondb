@@ -3,9 +3,9 @@
 --   1. Triggers on public.movies and the catalog tables queue the tmdb_id of every changed movie
 --      in catalog.graph_queue (a person's rename queues all of that person's movies).
 --   2. catalog.process_graph_queue() rebuilds the queued movies' Movie node and their DIRECTED, ACTED_IN and
---      IN_GENRE edges by the rules of 30-graph.sql, then reconciles every SIMILAR_TO pair against the embeddings,
---      because one changed movie can change the 3 nearest neighbors of others. All of it is one transaction, so
---      readers never see a half-built graph.
+--      IN_GENRE edges by the rules of 30-graph.sql, then reconciles every SIMILAR_TO pair against the BGE-M3
+--      embeddings (embedding_bge), because one changed movie can change the 3 nearest neighbors of others. All of
+--      it is one transaction, so readers never see a half-built graph.
 --   3. catalog.enqueue_graph_drift() queues movies that exist on only one side (relational rows or graph).
 -- The app calls 2 every 30 seconds and 3 every hour. The app role gets EXECUTE on these two functions only and
 -- cannot write the graph tables directly.
@@ -76,9 +76,10 @@ CREATE TRIGGER graph_queue_update AFTER UPDATE OF tmdb_id, title, release_date O
 DROP TRIGGER IF EXISTS graph_queue_change ON catalog.movie_docs;
 CREATE TRIGGER graph_queue_change AFTER INSERT OR DELETE ON catalog.movie_docs
 	FOR EACH ROW EXECUTE FUNCTION catalog.queue_graph_change();
+-- SIMILAR_TO follows embedding_bge only; a new Azure OpenAI embedding does not change the graph.
 DROP TRIGGER IF EXISTS graph_queue_update ON catalog.movie_docs;
-CREATE TRIGGER graph_queue_update AFTER UPDATE OF embedding ON catalog.movie_docs
-	FOR EACH ROW WHEN (OLD.embedding IS DISTINCT FROM NEW.embedding)
+CREATE TRIGGER graph_queue_update AFTER UPDATE OF embedding_bge ON catalog.movie_docs
+	FOR EACH ROW WHEN (OLD.embedding_bge IS DISTINCT FROM NEW.embedding_bge)
 	EXECUTE FUNCTION catalog.queue_graph_change();
 DROP TRIGGER IF EXISTS graph_queue_change ON catalog.movie_credits;
 CREATE TRIGGER graph_queue_change AFTER INSERT OR UPDATE OR DELETE ON catalog.movie_credits
@@ -153,8 +154,8 @@ END
 $fn$;
 
 -- Makes the SIMILAR_TO edges equal to the rule of 30-graph.sql: every movie links to its 3 nearest neighbors by
--- cosine distance, one edge per pair from the lower to the higher tmdb_id. Only differing pairs are touched.
--- Returns the number of removed plus created pairs.
+-- cosine distance of embedding_bge, one edge per pair from the lower to the higher tmdb_id. Only differing pairs
+-- are touched. Returns the number of removed plus created pairs.
 CREATE OR REPLACE FUNCTION catalog.reconcile_similar_to() RETURNS integer LANGUAGE plpgsql
 SET search_path = ag_catalog, pg_catalog
 AS $fn$
@@ -164,15 +165,15 @@ DECLARE
 	i integer := 1;
 BEGIN
 	WITH knn AS (
-		SELECT a.tmdb_id AS a, b.tmdb_id AS b, 1 - (a.embedding OPERATOR(public.<=>) b.embedding) AS score
+		SELECT a.tmdb_id AS a, b.tmdb_id AS b, 1 - (a.embedding_bge OPERATOR(public.<=>) b.embedding_bge) AS score
 		FROM catalog.movie_docs a
 		CROSS JOIN LATERAL (
-			SELECT d.tmdb_id, d.embedding FROM catalog.movie_docs d
-			WHERE d.tmdb_id <> a.tmdb_id AND d.embedding IS NOT NULL
-			ORDER BY d.embedding OPERATOR(public.<=>) a.embedding
+			SELECT d.tmdb_id, d.embedding_bge FROM catalog.movie_docs d
+			WHERE d.tmdb_id <> a.tmdb_id AND d.embedding_bge IS NOT NULL
+			ORDER BY d.embedding_bge OPERATOR(public.<=>) a.embedding_bge
 			LIMIT 3
 		) b
-		WHERE a.embedding IS NOT NULL
+		WHERE a.embedding_bge IS NOT NULL
 	), wanted AS (
 		SELECT DISTINCT ON (least(a, b), greatest(a, b)) least(a, b) AS a, greatest(a, b) AS b,
 			round(score::numeric, 4) AS score
