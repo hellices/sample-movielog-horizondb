@@ -100,9 +100,11 @@ secret_exists() {
   az rest --method get --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" -o none 2>/dev/null
 }
 put_secret() {
-  local file
+  local file tags="${4:-}"
+  [ -n "$tags" ] || tags='{}'
   file="$(tmpfile)"
-  printf '%s' "$2" | jq -Rs --arg type "${3:-text/plain}" '{properties: {value: ., contentType: $type}}' > "$file"
+  printf '%s' "$2" | jq -Rs --arg type "${3:-text/plain}" --argjson tags "$tags" \
+    '{tags: $tags, properties: {value: ., contentType: $type}}' > "$file"
   az rest --method put --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
     --body "@$file" -o none
   rm -f "$file"
@@ -116,19 +118,16 @@ for pair in "tmdb-api-key=TMDB_API_TOKEN" "omdb-api-key=OMDB_API_KEY"; do
   fi
 done
 
-# The ARM secret API never returns values, so the content type marks a secret that holds a real client credential.
-ENTRA_SECRET_TYPE=application/x-entra-client-secret
-secret_type() {
-  az rest --method get --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
-    --query properties.contentType -o tsv 2>/dev/null || true
-}
-# True when the newest credential this hook issued stays valid for more than 30 days.
-credential_current() {
-  local end threshold
-  end="$(az ad app credential list --id "$ENTRA_CLIENT_ID" \
-    --query "[?displayName=='aks-movielog'].endDateTime" -o tsv | sort | tail -1)"
+# The ARM secret API never returns values, so the secret's tags record which Entra credential it holds and when that
+# credential expires. A run renews the credential unless the stored one still exists and stays valid for 30 more days.
+stored_credential_current() {
+  local stored id end threshold
+  stored="$(az rest --method get --uri "https://management.azure.com$KV_ID/secrets/entra-client-secret?api-version=2023-07-01" \
+    --query "[tags.credentialId, tags.credentialEnd]" -o tsv 2>/dev/null || true)"
+  read -r id end <<<"$stored"
   threshold="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S"))')"
-  [ -n "$end" ] && [[ "${end:0:19}" > "$threshold" ]]
+  [ -n "$id" ] && [ "$id" != "None" ] && [[ "${end:0:19}" > "$threshold" ]] \
+    && [ "$(az ad app credential list --id "$ENTRA_CLIENT_ID" --query "length([?keyId=='$id'])" -o tsv)" = "1" ]
 }
 # Each step is recorded as soon as it succeeds, so a rerun after a failure resumes instead of creating a second app.
 if [ -n "${APP_HOST:-}" ]; then
@@ -142,7 +141,7 @@ if [ -n "${APP_HOST:-}" ]; then
   if ! az ad sp show --id "$ENTRA_CLIENT_ID" -o none 2>/dev/null; then
     az ad sp create --id "$ENTRA_CLIENT_ID" -o none
   fi
-  if [ "$(secret_type entra-client-secret)" != "$ENTRA_SECRET_TYPE" ] || ! credential_current; then
+  if ! stored_credential_current; then
     log "Client secret for $ENTRA_CLIENT_ID"
     credential="$(az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
       --append --years 1 --query password -o tsv)"
@@ -150,7 +149,10 @@ if [ -n "${APP_HOST:-}" ]; then
       echo "az ad app credential reset returned no secret for $ENTRA_CLIENT_ID" >&2
       exit 1
     fi
-    put_secret entra-client-secret "$credential" "$ENTRA_SECRET_TYPE"
+    # The credential just appended is the newest one with this display name.
+    issued="$(az ad app credential list --id "$ENTRA_CLIENT_ID" \
+      --query "sort_by([?displayName=='aks-movielog'], &startDateTime)[-1].{credentialId: keyId, credentialEnd: endDateTime}" -o json)"
+    put_secret entra-client-secret "$credential" text/plain "$issued"
     unset credential
   fi
 elif ! secret_exists entra-client-secret; then
