@@ -35,6 +35,16 @@ log "Starting vLLM with dragonkue/BGE-m3-ko on the GPU spot node (first start do
 envsubst '$VLLM_IMAGE' < k8s/40-embeddings-vllm.yaml | kubectl apply -f -
 kubectl rollout status deploy/embeddings -n movielog --timeout=25m
 
+# A renewed Entra credential: drop the CSI-synced secret so the next Pod's volume mount recreates it from Key Vault
+# before its containers read it, then let the changed template annotation roll the Pods.
+export ENTRA_CREDENTIAL_ID="${ENTRA_CREDENTIAL_ID:-}"
+running_credential="$(kubectl get deploy movielog -n movielog \
+  -o jsonpath='{.spec.template.metadata.annotations.movielog/entra-credential}' 2>/dev/null || true)"
+if kubectl get deploy movielog -n movielog -o none 2>/dev/null && [ "$running_credential" != "$ENTRA_CREDENTIAL_ID" ]; then
+  log "Entra credential changed: refreshing the movielog-keyvault secret"
+  kubectl delete secret movielog-keyvault -n movielog --ignore-not-found
+fi
+
 injection="$(kubectl get deploy movielog -n movielog -o jsonpath='{.spec.template.metadata.annotations.instrumentation\.opentelemetry\.io/inject-java}' 2>/dev/null || true)"
 if [ "$injection" = "false" ]; then
   # Already switched to the custom agent init image: kubectl apply would be rejected, so only roll the image.
@@ -42,6 +52,8 @@ if [ "$injection" = "false" ]; then
   kubectl set image deploy/movielog -n movielog "movielog=$APP_IMAGE"
   kubectl set env deploy/movielog -n movielog EMBEDDINGS_BGE_URL=http://embeddings.movielog.svc.cluster.local \
     EMBEDDING_DEFAULT_MODEL=bge
+  kubectl patch deployment movielog -n movielog --type merge -p "$(jq -n --arg id "$ENTRA_CREDENTIAL_ID" \
+    '{spec: {template: {metadata: {annotations: {"movielog/entra-credential": $id}}}}}')"
   # Keep the custom agent init image at the digest imported above.
   patch="$(tmpfile)"
   envsubst < k8s/21-agent-3.7.10.patch.yaml > "$patch"

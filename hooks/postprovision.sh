@@ -120,13 +120,16 @@ done
 
 # The ARM secret API never returns values, so the secret's tags record which Entra credential it holds and when that
 # credential expires. A run renews the credential unless the stored one still exists and stays valid for 30 more days.
+stored_credential() {
+  az rest --method get --uri "https://management.azure.com$KV_ID/secrets/entra-client-secret?api-version=2023-07-01" \
+    -o json 2>/dev/null | jq -r --arg field "$1" '.tags[$field] // empty' || true
+}
 stored_credential_current() {
-  local stored id end threshold
-  stored="$(az rest --method get --uri "https://management.azure.com$KV_ID/secrets/entra-client-secret?api-version=2023-07-01" \
-    --query "[tags.credentialId, tags.credentialEnd]" -o tsv 2>/dev/null || true)"
-  read -r id end <<<"$stored"
+  local id end threshold
+  id="$(stored_credential credentialId)"
+  end="$(stored_credential credentialEnd)"
   threshold="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S"))')"
-  [ -n "$id" ] && [ "$id" != "None" ] && [[ "${end:0:19}" > "$threshold" ]] \
+  [ -n "$id" ] && [[ "${end:0:19}" > "$threshold" ]] \
     && [ "$(az ad app credential list --id "$ENTRA_CLIENT_ID" --query "length([?keyId=='$id'])" -o tsv)" = "1" ]
 }
 # Each step is recorded as soon as it succeeds, so a rerun after a failure resumes instead of creating a second app.
@@ -155,6 +158,8 @@ if [ -n "${APP_HOST:-}" ]; then
     put_secret entra-client-secret "$credential" text/plain "$issued"
     unset credential
   fi
+  # postdeploy stamps this id on the Pod template, so a renewed credential rolls the Pods.
+  azd env set ENTRA_CREDENTIAL_ID "$(stored_credential credentialId)"
 elif ! secret_exists entra-client-secret; then
   put_secret entra-client-secret ""
 fi

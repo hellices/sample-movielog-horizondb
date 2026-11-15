@@ -18,6 +18,8 @@ spec:
       annotations:
         # Must be on the Pod template. The value is the Instrumentation CR name.
         instrumentation.opentelemetry.io/inject-java: "movielog"
+        # Entra credential the Pods were started with; a renewed credential changes it and rolls the Pods.
+        movielog/entra-credential: "${ENTRA_CREDENTIAL_ID}"
     spec:
       serviceAccountName: movielog
       containers:
