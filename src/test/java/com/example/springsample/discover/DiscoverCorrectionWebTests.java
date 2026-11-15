@@ -1,6 +1,7 @@
 package com.example.springsample.discover;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -33,6 +34,21 @@ class DiscoverCorrectionWebTests extends IntegrationTest {
 			.andExpect(status().isOk())
 			.andExpect(content().string(containsString("&#39;드늬 뷜베브&#39;을(를) &#39;드니 빌뇌브&#39;(으)로 고쳐 검색했습니다.")))
 			.andExpect(content().string(containsString("듄: 파트 2")));
+	}
+
+	@Test
+	void otherModelLinkSearchesTheCorrectedQuery() throws Exception {
+		MovieHit arrival = new MovieHit(329865, "컨택트", "Arrival", 2016, List.of("SF"), null, null, 0.4);
+		given(discoverService.resolveModel(null)).willReturn(EmbeddingModel.BGE);
+		given(discoverService.configuredModels()).willReturn(List.of(EmbeddingModel.OPENAI, EmbeddingModel.BGE));
+		given(discoverService.searchWithCorrection(eq("villenueve"), anyInt(), anyString(), eq(EmbeddingModel.BGE)))
+			.willReturn(new DiscoverService.DiscoverSearch(List.of(arrival),
+					new QueryCorrection("villeneuve", "villenueve", "villeneuve"), EmbeddingModel.BGE));
+
+		mockMvc.perform(get("/discover").param("q", "villenueve"))
+			.andExpect(status().isOk())
+			.andExpect(content().string(containsString("href=\"/discover?q=villeneuve&amp;model=openai\"")))
+			.andExpect(content().string(not(containsString("href=\"/discover?q=villenueve&amp;model=openai\""))));
 	}
 
 }

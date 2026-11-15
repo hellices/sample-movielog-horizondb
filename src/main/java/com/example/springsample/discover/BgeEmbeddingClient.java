@@ -101,7 +101,12 @@ class BgeEmbeddingClient {
 		}
 		float[] vector = new float[values.size()];
 		for (int i = 0; i < vector.length; i++) {
-			vector[i] = values.get(i);
+			Float value = values.get(i);
+			if (value == null) {
+				throw new EmbeddingUnavailableException("Null value at position " + i
+						+ " of an embedding in the BGE embedding response", null);
+			}
+			vector[i] = value;
 		}
 		return vector;
 	}

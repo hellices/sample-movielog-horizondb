@@ -122,6 +122,14 @@ secret_type() {
   az rest --method get --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
     --query properties.contentType -o tsv 2>/dev/null || true
 }
+# True when the newest credential this hook issued stays valid for more than 30 days.
+credential_current() {
+  local end threshold
+  end="$(az ad app credential list --id "$ENTRA_CLIENT_ID" \
+    --query "[?displayName=='aks-movielog'].endDateTime" -o tsv | sort | tail -1)"
+  threshold="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S"))')"
+  [ -n "$end" ] && [[ "${end:0:19}" > "$threshold" ]]
+}
 # Each step is recorded as soon as it succeeds, so a rerun after a failure resumes instead of creating a second app.
 if [ -n "${APP_HOST:-}" ]; then
   if [ -z "${ENTRA_CLIENT_ID:-}" ]; then
@@ -134,7 +142,7 @@ if [ -n "${APP_HOST:-}" ]; then
   if ! az ad sp show --id "$ENTRA_CLIENT_ID" -o none 2>/dev/null; then
     az ad sp create --id "$ENTRA_CLIENT_ID" -o none
   fi
-  if [ "$(secret_type entra-client-secret)" != "$ENTRA_SECRET_TYPE" ]; then
+  if [ "$(secret_type entra-client-secret)" != "$ENTRA_SECRET_TYPE" ] || ! credential_current; then
     log "Client secret for $ENTRA_CLIENT_ID"
     credential="$(az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
       --append --years 1 --query password -o tsv)"

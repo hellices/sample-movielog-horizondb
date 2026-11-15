@@ -150,6 +150,17 @@ class BgeEmbeddingClientTests {
 	}
 
 	@Test
+	void nullValueInAnEmbeddingIsAnEmbeddingError() {
+		BgeEmbeddingClient client = client("http://embeddings.test");
+		server.expect(requestTo(URL)).andRespond(withSuccess("""
+				{"data":[{"embedding":[0.5,null],"index":0}]}""", MediaType.APPLICATION_JSON));
+
+		assertThatThrownBy(() -> client.embed("a")).isInstanceOf(EmbeddingUnavailableException.class)
+			.hasMessageContaining("Null value at position 1");
+		server.verify();
+	}
+
+	@Test
 	void blankUrlDisablesTheModelWithoutRequests() {
 		BgeEmbeddingClient client = client(" ");
 

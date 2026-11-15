@@ -23,19 +23,20 @@ import org.springframework.jdbc.core.simple.JdbcClient.MappedQuerySpec;
 import org.springframework.jdbc.core.simple.JdbcClient.StatementSpec;
 
 /** The SQL compares and writes only the columns of the chosen models, cast to their vector sizes. */
+@SuppressWarnings({ "unchecked", "rawtypes" })
 class EmbeddingColumnSqlTests {
 
 	private final JdbcClient jdbc = mock();
 
 	private final StatementSpec statement = mock(StatementSpec.class, RETURNS_SELF);
 
+	private final MappedQuerySpec mapped = mock();
+
 	private final ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
 
 	@BeforeEach
-	@SuppressWarnings({ "unchecked", "rawtypes" })
 	void stubJdbc() {
 		given(jdbc.sql(sql.capture())).willReturn(statement);
-		MappedQuerySpec mapped = mock();
 		given(statement.query(any(RowMapper.class))).willReturn(mapped);
 		given(mapped.list()).willReturn(List.of());
 	}
@@ -49,6 +50,7 @@ class EmbeddingColumnSqlTests {
 			.doesNotContainPattern("embedding(?!_bge)");
 		verify(statement).param("v", "[0.5,0.25]");
 		verify(jdbc, times(1)).sql(any(String.class));
+		verifyQueriedList();
 		verify(statement, never()).update();
 	}
 
@@ -58,7 +60,9 @@ class EmbeddingColumnSqlTests {
 
 		assertThat(sql.getValue()).contains("CAST(:v AS vector(1536))", "d.embedding <=> q.v")
 			.doesNotContain("embedding_bge");
+		verify(statement).param("v", "[1.0]");
 		verify(jdbc, times(1)).sql(any(String.class));
+		verifyQueriedList();
 		verify(statement, never()).update();
 	}
 
@@ -68,6 +72,7 @@ class EmbeddingColumnSqlTests {
 
 		assertThat(sql.getValue()).contains("d.embedding_bge <=> (SELECT embedding_bge FROM catalog.movie_docs")
 			.doesNotContainPattern("embedding(?!_bge)");
+		verifyQueriedList();
 	}
 
 	@Test
@@ -80,6 +85,8 @@ class EmbeddingColumnSqlTests {
 
 		assertThat(sql.getValue()).contains("(tmdb_id, doc, embedding, embedding_bge, embedded_at)",
 				"(:tmdbId, :doc, CAST(:openai AS vector(1536)), CAST(:bge AS vector(1024)), now())");
+		verify(statement).param("tmdbId", 693134L);
+		verify(statement).param("doc", "제목: 듄: 파트 2");
 		verify(statement).param("openai", "[1.0]");
 		verify(statement).param("bge", "[2.0]");
 		verify(statement).update();
@@ -91,9 +98,16 @@ class EmbeddingColumnSqlTests {
 
 		assertThat(sql.getValue()).contains("(tmdb_id, doc, embedding_bge, embedded_at)")
 			.doesNotContainPattern("embedding(?!_bge)");
+		verify(statement).param("tmdbId", 693134L);
+		verify(statement).param("doc", "제목: 듄: 파트 2");
 		verify(statement).param("bge", "[2.0]");
 		verify(statement, never()).param(eq("openai"), any());
 		verify(statement).update();
+	}
+
+	private void verifyQueriedList() {
+		verify(statement).query(any(RowMapper.class));
+		verify(mapped).list();
 	}
 
 }

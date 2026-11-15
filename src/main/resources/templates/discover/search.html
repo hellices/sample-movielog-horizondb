@@ -58,7 +58,7 @@
 		<p class="small-text secondary-text">
 			임베딩 모델: <span th:text="${searchModelLabel}">모델</span>
 			<th:block th:if="${otherModel != null}">
-				· <a class="link" th:href="@{/discover(q=${q},model=${otherModel})}"
+				· <a class="link" th:href="@{/discover(q=${correction != null ? correction.query : q},model=${otherModel})}"
 					th:text="|${otherModelLabel}(으)로 다시 검색|">다른 모델로 다시 검색</a>
 			</th:block>
 		</p>

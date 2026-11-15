@@ -53,10 +53,10 @@ if [ -n "${DNS_ZONE_NAME:-}" ] && [ -n "${DNS_ZONE_RESOURCE_GROUP:-}" ]; then
       echo "$APP_HOST already has DNS records; choose an unused name" >&2
       exit 1
     fi
-    azd env set DNS_RECORD_CREATED true
   fi
   # A CNAME this environment did not create must not be repointed: it may serve another application.
-  if [ -n "$existing" ] && [ "$existing" != "$fqdn" ] && [ "${DNS_RECORD_CREATED:-}" != "true" ]; then
+  # DNS_RECORD_CREATED holds the host name the environment created, so ownership does not carry over to another host.
+  if [ -n "$existing" ] && [ "$existing" != "$fqdn" ] && [ "${DNS_RECORD_CREATED:-}" != "$APP_HOST" ]; then
     echo "$APP_HOST already points at $existing, which this environment did not create; choose an unused name" >&2
     exit 1
   fi
@@ -64,6 +64,9 @@ if [ -n "${DNS_ZONE_NAME:-}" ] && [ -n "${DNS_ZONE_RESOURCE_GROUP:-}" ]; then
     log "CNAME $APP_HOST -> $fqdn"
     az network dns record-set cname set-record "${dns[@]}" -n "$record" \
       -c "$fqdn" --ttl 300 -o none
+    if [ -z "$existing" ]; then
+      azd env set DNS_RECORD_CREATED "$APP_HOST"
+    fi
   fi
 else
   log "Point a CNAME record for $APP_HOST at $fqdn, then run: azd hooks run postdeploy"

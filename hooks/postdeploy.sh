@@ -53,8 +53,10 @@ else
 fi
 kubectl rollout status deploy/movielog -n movielog --timeout=10m
 
-injected="$(kubectl get pods -n movielog -l app=movielog -o jsonpath='{.items[0].spec.initContainers[*].image}')"
-injected_version="$(printf '%s' "$injected" | sed -nE 's/.*auto-?instrumentation[^:]*:([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
+# The oldest agent among the running (not terminating) pods decides; rollout status leaves only the current revision.
+injected_version="$(kubectl get pods -n movielog -l app=movielog -o json \
+  | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .spec.initContainers[]?.image' \
+  | sed -nE 's/.*auto-?instrumentation[^:]*:([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | sort -V | head -1)"
 if [ -n "$injected_version" ] && [ "$(printf '%s\n3.7.9\n' "$injected_version" | sort -V | head -1)" != "3.7.9" ]; then
   # Micrometer metrics need agent 3.7.9+; replace the managed injection in the two steps 21-agent-*.yaml describes.
   log "Managed agent $injected_version is older than 3.7.9: switching to the $AGENT_VERSION init image"
@@ -130,6 +132,7 @@ if [ "$sync" != "t" ] || [ "$rebuilt" = "true" ]; then
   admin_psql -d movielog -q -f db/40-graph-sync.sql
 fi
 kubectl scale deploy/movielog -n movielog --replicas=2
+kubectl rollout status deploy/movielog -n movielog --timeout=10m
 
 if [ "${ENABLE_LOADGEN:-true}" != "false" ]; then
   log "Load generator"
