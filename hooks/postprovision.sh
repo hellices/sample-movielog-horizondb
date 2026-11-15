@@ -102,7 +102,7 @@ secret_exists() {
 put_secret() {
   local file
   file="$(tmpfile)"
-  printf '%s' "$2" | jq -Rs '{properties: {value: ., contentType: "text/plain"}}' > "$file"
+  printf '%s' "$2" | jq -Rs --arg type "${3:-text/plain}" '{properties: {value: ., contentType: $type}}' > "$file"
   az rest --method put --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
     --body "@$file" -o none
   rm -f "$file"
@@ -116,9 +116,11 @@ for pair in "tmdb-api-key=TMDB_API_TOKEN" "omdb-api-key=OMDB_API_KEY"; do
   fi
 done
 
-secret_value() {
+# The ARM secret API never returns values, so the content type marks a secret that holds a real client credential.
+ENTRA_SECRET_TYPE=application/x-entra-client-secret
+secret_type() {
   az rest --method get --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
-    --query properties.value -o tsv 2>/dev/null || true
+    --query properties.contentType -o tsv 2>/dev/null || true
 }
 # Each step is recorded as soon as it succeeds, so a rerun after a failure resumes instead of creating a second app.
 if [ -n "${APP_HOST:-}" ]; then
@@ -132,10 +134,16 @@ if [ -n "${APP_HOST:-}" ]; then
   if ! az ad sp show --id "$ENTRA_CLIENT_ID" -o none 2>/dev/null; then
     az ad sp create --id "$ENTRA_CLIENT_ID" -o none
   fi
-  if [ -z "$(secret_value entra-client-secret)" ]; then
+  if [ "$(secret_type entra-client-secret)" != "$ENTRA_SECRET_TYPE" ]; then
     log "Client secret for $ENTRA_CLIENT_ID"
-    put_secret entra-client-secret "$(az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
+    credential="$(az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
       --append --years 1 --query password -o tsv)"
+    if [ -z "$credential" ]; then
+      echo "az ad app credential reset returned no secret for $ENTRA_CLIENT_ID" >&2
+      exit 1
+    fi
+    put_secret entra-client-secret "$credential" "$ENTRA_SECRET_TYPE"
+    unset credential
   fi
 elif ! secret_exists entra-client-secret; then
   put_secret entra-client-secret ""
