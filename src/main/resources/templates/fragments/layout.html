@@ -69,7 +69,7 @@
 </footer>
 
 <!-- Rating in half stars (1..10) as five icons. -->
-<span th:fragment="stars(rating)" class="stars" th:title="|별점 ${rating / 2.0}|"
+<span th:fragment="stars(rating)" class="stars" role="img" th:title="|별점 ${rating / 2.0}|"
 	th:attr="aria-label=|별점 ${rating / 2.0}점|"><i th:each="i : ${#numbers.sequence(1, 5)}"
 	th:classappend="${rating >= i * 2 or rating == i * 2 - 1} ? 'fill'"
 	th:text="${rating == i * 2 - 1} ? 'star_half' : 'star'">star</i></span>

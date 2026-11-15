@@ -17,6 +17,7 @@ export function starIcons(rating) {
 	const stars = document.createElement('span');
 	stars.className = 'stars';
 	stars.title = `별점 ${rating / 2}`;
+	stars.setAttribute('role', 'img');
 	stars.setAttribute('aria-label', `별점 ${rating / 2}점`);
 	for (let i = 1; i <= 5; i++) {
 		const icon = document.createElement('i');
