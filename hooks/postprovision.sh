@@ -52,8 +52,7 @@ fi
 retry 60 20 pool_ready
 
 log "HorizonDB administrator and firewall rules"
-body="$(mktemp)"
-trap 'rm -f "$body"' EXIT
+body="$(tmpfile)"
 chmod 600 "$body"
 jq -nc --arg login "$HORIZONDB_ADMIN" --arg password "$HORIZONDB_ADMIN_PASSWORD" \
   '{properties: {state: "Enabled", administratorLogin: $login, administratorLoginPassword: $password}}' > "$body"
@@ -102,8 +101,7 @@ secret_exists() {
 }
 put_secret() {
   local file
-  file="$(mktemp)"
-  chmod 600 "$file"
+  file="$(tmpfile)"
   printf '%s' "$2" | jq -Rs '{properties: {value: ., contentType: "text/plain"}}' > "$file"
   az rest --method put --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
     --body "@$file" -o none
@@ -118,15 +116,27 @@ for pair in "tmdb-api-key=TMDB_API_TOKEN" "omdb-api-key=OMDB_API_KEY"; do
   fi
 done
 
-if [ -n "${APP_HOST:-}" ] && [ -z "${ENTRA_CLIENT_ID:-}" ]; then
-  log "Microsoft Entra ID app registration for https://$APP_HOST"
-  ENTRA_CLIENT_ID="$(az ad app create --display-name "movielog-$AZURE_ENV_NAME" --sign-in-audience AzureADMyOrg \
-    --web-redirect-uris "https://$APP_HOST/login/oauth2/code/entra" --query appId -o tsv)"
-  az ad sp create --id "$ENTRA_CLIENT_ID" -o none
-  azd env set ENTRA_CLIENT_ID "$ENTRA_CLIENT_ID"
-  azd env set ENTRA_APP_CREATED true
-  put_secret entra-client-secret "$(az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
-    --years 1 --query password -o tsv)"
+secret_value() {
+  az rest --method get --uri "https://management.azure.com$KV_ID/secrets/$1?api-version=2023-07-01" \
+    --query properties.value -o tsv 2>/dev/null || true
+}
+# Each step is recorded as soon as it succeeds, so a rerun after a failure resumes instead of creating a second app.
+if [ -n "${APP_HOST:-}" ]; then
+  if [ -z "${ENTRA_CLIENT_ID:-}" ]; then
+    log "Microsoft Entra ID app registration for https://$APP_HOST"
+    ENTRA_CLIENT_ID="$(az ad app create --display-name "movielog-$AZURE_ENV_NAME" --sign-in-audience AzureADMyOrg \
+      --web-redirect-uris "https://$APP_HOST/login/oauth2/code/entra" --query appId -o tsv)"
+    azd env set ENTRA_CLIENT_ID "$ENTRA_CLIENT_ID"
+    azd env set ENTRA_APP_CREATED true
+  fi
+  if ! az ad sp show --id "$ENTRA_CLIENT_ID" -o none 2>/dev/null; then
+    az ad sp create --id "$ENTRA_CLIENT_ID" -o none
+  fi
+  if [ -z "$(secret_value entra-client-secret)" ]; then
+    log "Client secret for $ENTRA_CLIENT_ID"
+    put_secret entra-client-secret "$(az ad app credential reset --id "$ENTRA_CLIENT_ID" --display-name aks-movielog \
+      --append --years 1 --query password -o tsv)"
+  fi
 elif ! secret_exists entra-client-secret; then
   put_secret entra-client-secret ""
 fi

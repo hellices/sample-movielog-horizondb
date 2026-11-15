@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import org.junit.jupiter.api.Test;
 
@@ -86,15 +89,35 @@ class EmbeddingModelsTests {
 	}
 
 	@Test
-	void routesEachModelToItsClientAndRejectsVectorsOfTheWrongSize() {
+	void routesBgeOnlyToTheBgeClient() {
 		EmbeddingModels models = models(AOAI, BGE, null);
 		given(bge.embed("질문")).willReturn(new float[1024]);
-		given(openai.embed("질문")).willReturn(new float[3]);
 
 		assertThat(models.embed(EmbeddingModel.BGE, "질문")).hasSize(1024);
+		verify(bge, times(1)).embed("질문");
+		verifyNoInteractions(openai);
+	}
+
+	@Test
+	void routesOpenAiOnlyToTheOpenAiClient() {
+		EmbeddingModels models = models(AOAI, BGE, null);
+		given(openai.embed("질문")).willReturn(new float[1536]);
+
+		assertThat(models.embed(EmbeddingModel.OPENAI, "질문")).hasSize(1536);
+		verify(openai, times(1)).embed("질문");
+		verifyNoInteractions(bge);
+	}
+
+	@Test
+	void rejectsVectorsOfTheWrongSize() {
+		EmbeddingModels models = models(AOAI, BGE, null);
+		given(openai.embed("질문")).willReturn(new float[3]);
+
 		assertThatThrownBy(() -> models.embed(EmbeddingModel.OPENAI, "질문"))
 			.isInstanceOf(EmbeddingUnavailableException.class)
 			.hasMessageContaining("3 dimensions instead of 1536");
+		verify(openai, times(1)).embed("질문");
+		verifyNoInteractions(bge);
 	}
 
 }

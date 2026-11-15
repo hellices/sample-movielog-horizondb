@@ -7,6 +7,9 @@
 # shellcheck source=hooks/lib.sh
 source "$(dirname "$0")/lib.sh"
 
+# A deploy-only run (azd deploy) must not rely on a kubeconfig left by postprovision.
+az aks get-credentials -g "$AZURE_RESOURCE_GROUP" -n "$AZURE_AKS_CLUSTER_NAME" --overwrite-existing -o none
+
 log "Importing $APP_IMAGE_SOURCE and $AGENT_IMAGE_SOURCE into $AZURE_CONTAINER_REGISTRY_NAME"
 az acr import -n "$AZURE_CONTAINER_REGISTRY_NAME" --source "$APP_IMAGE_SOURCE" \
   --image "movielog:$MOVIELOG_VERSION" --force -o none
@@ -39,6 +42,11 @@ if [ "$injection" = "false" ]; then
   kubectl set image deploy/movielog -n movielog "movielog=$APP_IMAGE"
   kubectl set env deploy/movielog -n movielog EMBEDDINGS_BGE_URL=http://embeddings.movielog.svc.cluster.local \
     EMBEDDING_DEFAULT_MODEL=bge
+  # Keep the custom agent init image at the digest imported above.
+  patch="$(tmpfile)"
+  envsubst < k8s/21-agent-3.7.10.patch.yaml > "$patch"
+  kubectl patch deployment movielog -n movielog --type strategic --patch-file "$patch"
+  rm -f "$patch"
 else
   log "Deploying MovieLog"
   envsubst < k8s/20-movielog.yaml | kubectl apply -f -
@@ -53,7 +61,7 @@ if [ -n "$injected_version" ] && [ "$(printf '%s\n3.7.9\n' "$injected_version" |
   kubectl patch deployment movielog -n movielog --type merge \
     -p '{"spec":{"template":{"metadata":{"annotations":{"instrumentation.opentelemetry.io/inject-java":"false"}}}}}'
   kubectl rollout status deploy/movielog -n movielog --timeout=10m
-  patch="$(mktemp)"
+  patch="$(tmpfile)"
   envsubst < k8s/21-agent-3.7.10.patch.yaml > "$patch"
   kubectl patch deployment movielog -n movielog --type strategic --patch-file "$patch"
   rm -f "$patch"
@@ -72,34 +80,46 @@ if [ "$movies" = "0" ]; then
     python3 data/enrich_tmdb.py
     admin_psql -d movielog -q -f data/out/tmdb.sql
   fi
-  log "Embedding the catalog with Azure OpenAI"
-  # The operator's Cognitive Services OpenAI User role can take a few minutes to apply.
-  embed() {
-    PGHOST="$HORIZONDB_HOST" PGUSER="$HORIZONDB_ADMIN" PGPASSWORD="$HORIZONDB_ADMIN_PASSWORD" PGDATABASE=movielog \
-      PGSSLMODE=require python3 data/embed_catalog.py
-  }
-  retry 10 60 embed
 fi
-missing_bge="$(admin_psql -d movielog -Atc 'SELECT count(*) FROM catalog.movie_docs WHERE embedding_bge IS NULL')"
+# Each step checks what is already in the database, so a rerun after a failure resumes where it stopped.
+missing() { admin_psql -d movielog -Atc "SELECT count(*) FROM catalog.movie_docs WHERE $1 IS NULL"; }
+embed() {
+  PGHOST="$HORIZONDB_HOST" PGUSER="$HORIZONDB_ADMIN" PGPASSWORD="$HORIZONDB_ADMIN_PASSWORD" PGDATABASE=movielog \
+    PGSSLMODE=require EMBEDDINGS_BGE_URL=http://localhost:18081 python3 data/embed_catalog.py "$@"
+}
+missing_openai="$(missing embedding)"
+if [ "$missing_openai" != "0" ]; then
+  log "Embedding $missing_openai documents with Azure OpenAI"
+  # The operator's Cognitive Services OpenAI User role can take a few minutes to apply.
+  retry 10 60 embed --model openai
+fi
+missing_bge="$(missing embedding_bge)"
 if [ "$missing_bge" != "0" ]; then
   log "Embedding $missing_bge documents with bge-m3-ko through vLLM"
   kubectl port-forward -n movielog svc/embeddings 18081:80 >/dev/null 2>&1 &
   port_forward=$!
-  embed_bge() {
-    EMBEDDINGS_BGE_URL=http://localhost:18081 PGHOST="$HORIZONDB_HOST" PGUSER="$HORIZONDB_ADMIN" \
-      PGPASSWORD="$HORIZONDB_ADMIN_PASSWORD" PGDATABASE=movielog PGSSLMODE=require python3 data/embed_catalog.py --model bge
-  }
-  retry 5 15 embed_bge
+  retry 5 15 embed --model bge
   kill "$port_forward"
 fi
-if [ "$movies" = "0" ] || [ "$missing_bge" != "0" ]; then
-  # SIMILAR_TO follows the bge embeddings, so the graph is (re)built once they exist.
+
+indexes="$(admin_psql -d movielog -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname = 'catalog'
+  AND indexname IN ('movie_docs_embedding_diskann', 'movie_docs_embedding_bge_diskann')")"
+if [ "$indexes" != "2" ]; then
+  log "DiskANN vector indexes"
   admin_psql -d movielog -q -f db/20-vector-index.sql
-  log "Building the AGE graph and installing the graph sync"
+fi
+graph="$(admin_psql -d movielog -Atc "SELECT count(*) FROM ag_catalog.ag_graph WHERE name = 'movie_graph'")"
+rebuilt=false
+if [ "$graph" = "0" ] || [ "$missing_bge" != "0" ]; then
+  # SIMILAR_TO follows the bge embeddings, so the graph is rebuilt whenever they change.
+  log "Building the AGE graph"
   admin_psql -d movielog -q -f db/30-graph.sql
+  rebuilt=true
+fi
+sync="$(admin_psql -d movielog -Atc "SELECT to_regprocedure('catalog.process_graph_queue(integer,boolean)') IS NOT NULL")"
+if [ "$sync" != "t" ] || [ "$rebuilt" = "true" ]; then
+  log "Installing the graph sync"
   admin_psql -d movielog -q -f db/40-graph-sync.sql
-else
-  echo "catalog already holds $movies movies with both embeddings; skipping the load"
 fi
 kubectl scale deploy/movielog -n movielog --replicas=2
 
@@ -110,7 +130,7 @@ if [ "${ENABLE_LOADGEN:-true}" != "false" ]; then
 fi
 
 log "Grafana dashboard"
-dashboard="$(mktemp)"
+dashboard="$(tmpfile)"
 python3 - "$APPLICATIONINSIGHTS_ID" > "$dashboard" <<'PY'
 import json, sys
 d = json.load(open("grafana/movielog-horizondb-dashboard.json", encoding="utf-8"))

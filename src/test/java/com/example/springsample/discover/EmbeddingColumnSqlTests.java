@@ -2,9 +2,12 @@ package com.example.springsample.discover;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import java.util.EnumMap;
@@ -45,6 +48,8 @@ class EmbeddingColumnSqlTests {
 				"d.embedding_bge IS NOT NULL")
 			.doesNotContainPattern("embedding(?!_bge)");
 		verify(statement).param("v", "[0.5,0.25]");
+		verify(jdbc, times(1)).sql(any(String.class));
+		verify(statement, never()).update();
 	}
 
 	@Test
@@ -53,6 +58,8 @@ class EmbeddingColumnSqlTests {
 
 		assertThat(sql.getValue()).contains("CAST(:v AS vector(1536))", "d.embedding <=> q.v")
 			.doesNotContain("embedding_bge");
+		verify(jdbc, times(1)).sql(any(String.class));
+		verify(statement, never()).update();
 	}
 
 	@Test
@@ -84,6 +91,9 @@ class EmbeddingColumnSqlTests {
 
 		assertThat(sql.getValue()).contains("(tmdb_id, doc, embedding_bge, embedded_at)")
 			.doesNotContainPattern("embedding(?!_bge)");
+		verify(statement).param("bge", "[2.0]");
+		verify(statement, never()).param(eq("openai"), any());
+		verify(statement).update();
 	}
 
 }

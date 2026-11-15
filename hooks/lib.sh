@@ -25,6 +25,12 @@ VLLM_IMAGE_SOURCE="${VLLM_IMAGE_SOURCE:-docker.io/vllm/vllm-openai:v0.32.0}"
 # shellcheck disable=SC2034
 AGENT_IMAGE_SOURCE="${AGENT_IMAGE_SOURCE:-$GHCR_REPOSITORY/applicationinsights-agent:$AGENT_VERSION}"
 
+# Every temporary file goes under one 700 directory that is removed on exit, also when a command fails.
+HOOK_TMP="$(mktemp -d)"
+chmod 700 "$HOOK_TMP"
+trap 'rm -rf "$HOOK_TMP"' EXIT
+tmpfile() { mktemp "$HOOK_TMP/tmp.XXXXXX"; }
+
 log() { printf '\n==> %s\n' "$*"; }
 
 need() {

@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import org.jspecify.annotations.Nullable;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
@@ -69,11 +70,29 @@ class BgeEmbeddingClient {
 					+ ((response == null || response.data() == null) ? 0 : response.data().size()) + " embeddings for "
 					+ texts.size() + " inputs", null);
 		}
+		if (!indexesCoverInputs(response.data(), texts.size())) {
+			throw new EmbeddingUnavailableException("BGE embedding server returned indexes "
+					+ response.data().stream().map(item -> (item != null) ? item.index() : null).toList() + " for " + texts.size()
+					+ " inputs", null);
+		}
 		return response.data()
 			.stream()
 			.sorted(Comparator.comparingInt(EmbeddingResponse.Item::index))
 			.map(item -> toArray(item.embedding()))
 			.toList();
+	}
+
+	/** Whether the indexes are exactly 0..size-1, each once, so sorting by index restores the input order. */
+	private static boolean indexesCoverInputs(List<EmbeddingResponse.Item> items, int size) {
+		boolean[] seen = new boolean[size];
+		for (EmbeddingResponse.Item item : items) {
+			Integer index = (item != null) ? item.index() : null;
+			if (index == null || index < 0 || index >= size || seen[index]) {
+				return false;
+			}
+			seen[index] = true;
+		}
+		return true;
 	}
 
 	private static float[] toArray(List<Float> values) {
@@ -91,7 +110,7 @@ class BgeEmbeddingClient {
 	record EmbeddingResponse(List<Item> data) {
 
 		@JsonIgnoreProperties(ignoreUnknown = true)
-		record Item(int index, List<Float> embedding) {
+		record Item(@Nullable Integer index, List<Float> embedding) {
 		}
 
 	}

@@ -55,6 +55,11 @@ if [ -n "${DNS_ZONE_NAME:-}" ] && [ -n "${DNS_ZONE_RESOURCE_GROUP:-}" ]; then
     fi
     azd env set DNS_RECORD_CREATED true
   fi
+  # A CNAME this environment did not create must not be repointed: it may serve another application.
+  if [ -n "$existing" ] && [ "$existing" != "$fqdn" ] && [ "${DNS_RECORD_CREATED:-}" != "true" ]; then
+    echo "$APP_HOST already points at $existing, which this environment did not create; choose an unused name" >&2
+    exit 1
+  fi
   if [ "$existing" != "$fqdn" ]; then
     log "CNAME $APP_HOST -> $fqdn"
     az network dns record-set cname set-record "${dns[@]}" -n "$record" \
@@ -69,5 +74,6 @@ envsubst '$APP_HOST' < k8s/27-tls.yaml | kubectl apply -f -
 if kubectl wait certificate/movielog-tls -n movielog --for=condition=Ready --timeout=10m; then
   log "Done. https://$APP_HOST"
 else
-  echo "The certificate is not ready yet; check that $APP_HOST resolves to $fqdn" >&2
+  echo "The certificate is not ready; check that $APP_HOST resolves to $fqdn, then run: azd hooks run postdeploy" >&2
+  exit 1
 fi

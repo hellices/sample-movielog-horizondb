@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.mock.http.client.MockClientHttpRequest;
 import org.springframework.test.json.JsonCompareMode;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
@@ -83,12 +82,17 @@ class BgeEmbeddingClientTests {
 			.mapToObj(i -> "{\"embedding\":[" + i + "],\"index\":" + i + "}")
 			.reduce((a, b) -> a + "," + b)
 			.orElseThrow();
+		String firstInputs = IntStream.range(0, 32)
+			.mapToObj(i -> "\"doc " + i + "\"")
+			.reduce((a, b) -> a + "," + b)
+			.orElseThrow();
 		server.expect(times(1), requestTo(URL))
-			.andExpect(request -> assertThat(((MockClientHttpRequest) request).getBodyAsString()).contains("doc 31").doesNotContain("doc 32"))
+			.andExpect(content().json("{\"input\":[" + firstInputs + "],\"model\":\"dragonkue/BGE-m3-ko\"}",
+					JsonCompareMode.STRICT))
 			.andRespond(withSuccess("{\"data\":[" + full + "]}", MediaType.APPLICATION_JSON));
 		server.expect(times(1), requestTo(URL))
 			.andExpect(content().json("""
-					{"input":["doc 32"]}"""))
+					{"input":["doc 32"],"model":"dragonkue/BGE-m3-ko"}""", JsonCompareMode.STRICT))
 			.andRespond(withSuccess("""
 					{"data":[{"embedding":[32],"index":0}]}""", MediaType.APPLICATION_JSON));
 
@@ -120,6 +124,28 @@ class BgeEmbeddingClientTests {
 			.hasMessageContaining("0 embeddings for 1 inputs");
 		assertThatThrownBy(() -> client.embed("c")).isInstanceOf(EmbeddingUnavailableException.class)
 			.hasMessageContaining("Empty");
+		server.verify();
+	}
+
+	@Test
+	void duplicateIndexesAreEmbeddingErrors() {
+		BgeEmbeddingClient client = client("http://embeddings.test");
+		server.expect(requestTo(URL)).andRespond(withSuccess("""
+				{"data":[{"embedding":[1.0],"index":0},{"embedding":[2.0],"index":0}]}""", MediaType.APPLICATION_JSON));
+
+		assertThatThrownBy(() -> client.embedAll(List.of("a", "b"))).isInstanceOf(EmbeddingUnavailableException.class)
+			.hasMessageContaining("indexes [0, 0] for 2 inputs");
+		server.verify();
+	}
+
+	@Test
+	void missingIndexIsAnEmbeddingErrorRatherThanIndexZero() {
+		BgeEmbeddingClient client = client("http://embeddings.test");
+		server.expect(requestTo(URL)).andRespond(withSuccess("""
+				{"data":[{"embedding":[1.0]},{"embedding":[2.0],"index":1}]}""", MediaType.APPLICATION_JSON));
+
+		assertThatThrownBy(() -> client.embedAll(List.of("a", "b"))).isInstanceOf(EmbeddingUnavailableException.class)
+			.hasMessageContaining("indexes [null, 1] for 2 inputs");
 		server.verify();
 	}
 
