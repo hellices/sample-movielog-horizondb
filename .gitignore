@@ -45,3 +45,6 @@ out/
 # Generated catalog (Wikipedia text is CC BY-SA; regenerate with data/build_catalog.py)
 data/out/
 
+
+### azd local state ###
+.azure/

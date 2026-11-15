@@ -2,8 +2,8 @@
 -- Rebuilds the Apache AGE graph "movie_graph" from the relational catalog:
 --   (:Person)-[:DIRECTED]->(:Movie), (:Person)-[:ACTED_IN {position}]->(:Movie),
 --   (:Movie)-[:IN_GENRE]->(:Genre), (:Movie)-[:SIMILAR_TO {score}]->(:Movie)
--- SIMILAR_TO links each movie to its 3 nearest neighbors by embedding (cosine). Run it for the first build or to
--- start over; afterwards 40-graph-sync.sql keeps the graph current without dropping it.
+-- SIMILAR_TO links each movie to its 3 nearest neighbors by the BGE-M3 embedding (embedding_bge, cosine). Run it
+-- for the first build or to start over; afterwards 40-graph-sync.sql keeps the graph current without dropping it.
 \set ON_ERROR_STOP on
 
 SET search_path = ag_catalog, "$user", public;
@@ -82,17 +82,17 @@ SELECT pg_temp.unwind(array_agg(format('{m: %s, g: %s}', g.tmdb_id, pg_temp.cy(g
 	'MATCH (m:Movie {tmdb_id: e.m}), (g:Genre {name: e.g}) CREATE (m)-[:IN_GENRE]->(g)') AS genre_edge_batches
 FROM catalog.movie_genres g JOIN public.movies USING (tmdb_id);
 
--- One undirected pair per neighbor relation, scored by cosine similarity.
+-- One undirected pair per neighbor relation, scored by cosine similarity of the BGE-M3 embeddings.
 WITH knn AS (
-	SELECT a.tmdb_id AS a, b.tmdb_id AS b, 1 - (a.embedding <=> b.embedding) AS score
+	SELECT a.tmdb_id AS a, b.tmdb_id AS b, 1 - (a.embedding_bge <=> b.embedding_bge) AS score
 	FROM catalog.movie_docs a
 	CROSS JOIN LATERAL (
-		SELECT tmdb_id, embedding FROM catalog.movie_docs b
-		WHERE b.tmdb_id <> a.tmdb_id AND b.embedding IS NOT NULL
-		ORDER BY b.embedding <=> a.embedding
+		SELECT tmdb_id, embedding_bge FROM catalog.movie_docs b
+		WHERE b.tmdb_id <> a.tmdb_id AND b.embedding_bge IS NOT NULL
+		ORDER BY b.embedding_bge <=> a.embedding_bge
 		LIMIT 3
 	) b
-	WHERE a.embedding IS NOT NULL
+	WHERE a.embedding_bge IS NOT NULL
 ), pairs AS (
 	SELECT DISTINCT ON (least(a, b), greatest(a, b)) least(a, b) AS a, greatest(a, b) AS b, round(score::numeric, 4) AS score
 	FROM knn

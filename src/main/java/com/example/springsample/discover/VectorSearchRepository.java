@@ -17,8 +17,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 /**
- * Nearest-neighbor search over {@code catalog.movie_docs.embedding} by pgvector cosine distance. A DiskANN index
- * exists, but with a few hundred rows the planner usually prefers a sequential scan.
+ * Nearest-neighbor search over the vector column of an {@link EmbeddingModel} in {@code catalog.movie_docs} by
+ * pgvector cosine distance. Each column has a DiskANN index, but with a few hundred rows the planner usually prefers a
+ * sequential scan. Column names and sizes come only from {@link EmbeddingModel}.
  * <p>
  * A whole-document embedding ranks short title or name queries ("듄", "드니 빌뇌브") poorly, so {@link #search}
  * fuses the vector ranking with a keyword ranking over the document header (title, original title, year, genres,
@@ -53,25 +54,26 @@ class VectorSearchRepository {
 		this.jdbc = jdbc;
 	}
 
-	List<MovieHit> search(float[] embedding, String query, int limit) {
+	/** {@code embedding} must come from {@code model}; its column is the only one compared. */
+	List<MovieHit> search(EmbeddingModel model, float[] embedding, String query, int limit) {
 		List<String> keywords = keywords(query);
 		return jdbc.sql("""
-				WITH q AS (SELECT CAST(:v AS vector) AS v),
+				WITH q AS (SELECT %2$s AS v),
 				vec AS (
-					SELECT d.tmdb_id, row_number() OVER (ORDER BY d.embedding <=> q.v) AS r
+					SELECT d.tmdb_id, row_number() OVER (ORDER BY d.%3$s <=> q.v) AS r
 					FROM catalog.movie_docs d, q
-					WHERE d.embedding IS NOT NULL
-					ORDER BY d.embedding <=> q.v
+					WHERE d.%3$s IS NOT NULL
+					ORDER BY d.%3$s <=> q.v
 					LIMIT :pool),
 				lex AS (
 					SELECT tmdb_id, row_number() OVER (ORDER BY hits DESC, dist) AS r,
 					       CASE WHEN hits = :keywordCount THEN 2 ELSE 1 END AS w
 					FROM (
-						SELECT d.tmdb_id, d.embedding <=> q.v AS dist,
+						SELECT d.tmdb_id, d.%3$s <=> q.v AS dist,
 						       (SELECT count(*) FROM unnest(string_to_array(:terms, chr(31))) AS t(term)
 						        WHERE t.term <> '' AND strpos(lower(split_part(split_part(d.doc, chr(10) || '줄거리:', 1), chr(10) || 'Summary:', 1)), t.term) > 0) AS hits
 						FROM catalog.movie_docs d, q
-						WHERE d.embedding IS NOT NULL) x
+						WHERE d.%3$s IS NOT NULL) x
 					WHERE hits > 0 AND hits * 2 >= :keywordCount
 					ORDER BY hits DESC, dist
 					LIMIT :pool),
@@ -79,13 +81,13 @@ class VectorSearchRepository {
 					SELECT tmdb_id, sum(w * 1.0 / (:k + r)) AS rrf
 					FROM (SELECT tmdb_id, r, 1 AS w FROM vec UNION ALL SELECT tmdb_id, r, w FROM lex) ranked
 					GROUP BY tmdb_id)
-				SELECT %s, 1 - (d.embedding <=> q.v) AS score
+				SELECT %1$s, 1 - (d.%3$s <=> q.v) AS score
 				FROM fused f
 				JOIN catalog.movie_docs d ON d.tmdb_id = f.tmdb_id
 				JOIN public.movies m ON m.tmdb_id = d.tmdb_id
 				CROSS JOIN q
-				ORDER BY f.rrf DESC, d.embedding <=> q.v
-				LIMIT :limit""".formatted(COLUMNS))
+				ORDER BY f.rrf DESC, d.%3$s <=> q.v
+				LIMIT :limit""".formatted(COLUMNS, model.castParameter("v"), model.column()))
 			.param("v", toLiteral(embedding))
 			.param("terms", String.join(String.valueOf(KEYWORD_SEPARATOR), keywords))
 			.param("keywordCount", keywords.size())
@@ -114,15 +116,15 @@ class VectorSearchRepository {
 		return List.copyOf(words);
 	}
 
-	/** Empty when the movie has no embedding, instead of unrelated movies scored from a NULL distance. */
-	List<MovieHit> similar(long tmdbId, int limit) {
+	/** Empty when the movie has no embedding of {@code model}, instead of unrelated movies scored from a NULL distance. */
+	List<MovieHit> similar(EmbeddingModel model, long tmdbId, int limit) {
 		return jdbc.sql("""
-				SELECT %s, 1 - (d.embedding <=> (SELECT embedding FROM catalog.movie_docs WHERE tmdb_id = :tmdbId)) AS score
+				SELECT %1$s, 1 - (d.%2$s <=> (SELECT %2$s FROM catalog.movie_docs WHERE tmdb_id = :tmdbId)) AS score
 				FROM catalog.movie_docs d JOIN public.movies m ON m.tmdb_id = d.tmdb_id
-				WHERE d.tmdb_id <> :tmdbId AND d.embedding IS NOT NULL
-				  AND EXISTS (SELECT 1 FROM catalog.movie_docs WHERE tmdb_id = :tmdbId AND embedding IS NOT NULL)
-				ORDER BY d.embedding <=> (SELECT embedding FROM catalog.movie_docs WHERE tmdb_id = :tmdbId)
-				LIMIT :limit""".formatted(COLUMNS))
+				WHERE d.tmdb_id <> :tmdbId AND d.%2$s IS NOT NULL
+				  AND EXISTS (SELECT 1 FROM catalog.movie_docs WHERE tmdb_id = :tmdbId AND %2$s IS NOT NULL)
+				ORDER BY d.%2$s <=> (SELECT %2$s FROM catalog.movie_docs WHERE tmdb_id = :tmdbId)
+				LIMIT :limit""".formatted(COLUMNS, model.column()))
 			.param("tmdbId", tmdbId)
 			.param("limit", limit)
 			.query(VectorSearchRepository::hit)

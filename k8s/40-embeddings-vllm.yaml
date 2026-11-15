@@ -1,0 +1,101 @@
+# Korean BGE-M3 embeddings (dragonkue/BGE-m3-ko, 1,024 dimensions, CLS pooling, normalized) served by vLLM on a
+# GPU spot node (nodepool label workload=embeddings, taints sku=gpu and the spot taint). The app and the catalog
+# loader call the OpenAI-compatible POST /v1/embeddings inside the cluster; nothing is exposed outside. The model
+# (about 2.3 GB) is downloaded from Hugging Face at start.
+#   VLLM_IMAGE: the vLLM OpenAI server image, imported into ACR (docker.io/vllm/vllm-openai)
+# A spot eviction removes the node; the cluster autoscaler (min 1) brings a new one and the Pod reschedules there.
+# Until it is ready, semantic search with the bge model returns 503 and the openai model keeps working.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embeddings
+  namespace: movielog
+  labels:
+    app: embeddings
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: embeddings
+  template:
+    metadata:
+      labels:
+        app: embeddings
+    spec:
+      nodeSelector:
+        workload: embeddings
+      tolerations:
+        - key: sku
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
+        - key: kubernetes.azure.com/scalesetpriority
+          operator: Equal
+          value: spot
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: "${VLLM_IMAGE}"
+          args:
+            - --model=dragonkue/BGE-m3-ko
+            # Pinned model commit, so a document and a later query use the same weights.
+            - --revision=7074d66aa46562342193ca4feb3d89bf9dad71b4
+            - --served-model-name=dragonkue/BGE-m3-ko
+            - --runner=pooling
+            # T4 has no bfloat16.
+            - --dtype=float16
+            - '--pooler-config={"pooling_type": "CLS"}'
+            - --max-model-len=8192
+            - --port=8000
+          env:
+            - name: HF_HOME
+              value: /models
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              memory: 14Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: models
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embeddings
+  namespace: movielog
+spec:
+  selector:
+    app: embeddings
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

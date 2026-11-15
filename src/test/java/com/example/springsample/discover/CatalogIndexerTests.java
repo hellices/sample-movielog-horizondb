@@ -38,7 +38,7 @@ class CatalogIndexerTests {
 
 	private final CatalogIndexRepository repository = mock();
 
-	private final EmbeddingClient embeddings = mock();
+	private final EmbeddingModels embeddings = mock();
 
 	private final TmdbCreditsClient tmdb = mock();
 
@@ -74,7 +74,7 @@ class CatalogIndexerTests {
 
 	@Test
 	void storesDocumentCreditsAndGenresForEachMovieThenAppliesTheGraphQueue() {
-		given(embeddings.isEnabled()).willReturn(true);
+		given(embeddings.configured()).willReturn(List.of(EmbeddingModel.OPENAI));
 		given(tmdb.isEnabled()).willReturn(true);
 		given(tmdb.credits(693134)).willReturn(DUNE_2_CREDITS);
 		given(tmdb.credits(1)).willReturn(Credits.NONE);
@@ -82,37 +82,67 @@ class CatalogIndexerTests {
 		given(repository.tryLock()).willReturn(true);
 		given(repository.pending(1)).willReturn(List.of(DUNE_2), List.of(UNKNOWN), List.of());
 		float[] vector = { 0.1f, 0.2f };
-		given(embeddings.embed(anyString())).willReturn(vector);
+		given(embeddings.embed(eq(EmbeddingModel.OPENAI), anyString())).willReturn(vector);
 
 		assertThat(indexer.indexPending()).containsExactly(693134L, 1L);
 		InOrder order = inOrder(repository);
-		order.verify(repository).insert(693134L, CatalogIndexer.document(DUNE_2, DUNE_2_CREDITS), vector);
+		order.verify(repository).insert(693134L, CatalogIndexer.document(DUNE_2, DUNE_2_CREDITS),
+				Map.of(EmbeddingModel.OPENAI, vector));
 		order.verify(repository).saveCredits(693134L, DUNE_2_CREDITS, Map.of(137427L, "Q548823"));
 		order.verify(repository).saveGenres(693134L, "SF, 모험");
-		order.verify(repository).insert(1L, "제목: 제목", vector);
+		order.verify(repository).insert(1L, "제목: 제목", Map.of(EmbeddingModel.OPENAI, vector));
 		verify(corrector).refresh();
 		verify(graphSync).processQueue();
 	}
 
 	@Test
+	void fillsTheColumnOfEveryConfiguredModel() {
+		given(embeddings.configured()).willReturn(List.of(EmbeddingModel.OPENAI, EmbeddingModel.BGE));
+		given(repository.tryLock()).willReturn(true);
+		given(repository.pending(1)).willReturn(List.of(UNKNOWN), List.of());
+		float[] openai = { 0.1f };
+		float[] bge = { 0.2f };
+		given(embeddings.embed(EmbeddingModel.OPENAI, "제목: 제목")).willReturn(openai);
+		given(embeddings.embed(EmbeddingModel.BGE, "제목: 제목")).willReturn(bge);
+
+		assertThat(indexer.indexPending()).containsExactly(1L);
+		verify(repository).insert(1L, "제목: 제목", Map.of(EmbeddingModel.OPENAI, openai, EmbeddingModel.BGE, bge));
+	}
+
+	@Test
+	void aFailingSecondModelLeavesTheMovieForTheNextRun() {
+		given(embeddings.configured()).willReturn(List.of(EmbeddingModel.OPENAI, EmbeddingModel.BGE));
+		given(repository.tryLock()).willReturn(true);
+		given(repository.pending(1)).willReturn(List.of(UNKNOWN));
+		given(embeddings.embed(EmbeddingModel.OPENAI, "제목: 제목")).willReturn(new float[] { 0.1f });
+		given(embeddings.embed(EmbeddingModel.BGE, "제목: 제목"))
+			.willThrow(new EmbeddingUnavailableException("BGE server down", null));
+
+		assertThat(indexer.indexPending()).isEmpty();
+		verify(repository, never()).insert(anyLong(), anyString(), any());
+	}
+
+	@Test
 	void anotherPodHoldingTheLockMakesTheRunANoOp() {
-		given(embeddings.isEnabled()).willReturn(true);
+		given(embeddings.configured()).willReturn(List.of(EmbeddingModel.OPENAI));
 		given(repository.tryLock()).willReturn(false);
 
 		assertThat(indexer.indexPending()).isEmpty();
 		verify(repository, never()).pending(1);
-		verify(embeddings, never()).embed(anyString());
+		verify(embeddings, never()).embed(any(), anyString());
 		verify(corrector, never()).refresh();
 		verify(graphSync, never()).processQueue();
 	}
 
 	@Test
 	void stopsAtTheFirstEmbeddingFailureAndKeepsEarlierMovies() {
-		given(embeddings.isEnabled()).willReturn(true);
+		given(embeddings.configured()).willReturn(List.of(EmbeddingModel.OPENAI));
 		given(repository.tryLock()).willReturn(true);
 		given(repository.pending(1)).willReturn(List.of(DUNE_2), List.of(UNKNOWN));
-		given(embeddings.embed(CatalogIndexer.document(DUNE_2, Credits.NONE))).willReturn(new float[] { 1f });
-		given(embeddings.embed("제목: 제목")).willThrow(new EmbeddingUnavailableException("down", null));
+		given(embeddings.embed(EmbeddingModel.OPENAI, CatalogIndexer.document(DUNE_2, Credits.NONE)))
+			.willReturn(new float[] { 1f });
+		given(embeddings.embed(EmbeddingModel.OPENAI, "제목: 제목"))
+			.willThrow(new EmbeddingUnavailableException("down", null));
 
 		assertThat(indexer.indexPending()).containsExactly(693134L);
 		verify(repository, never()).insert(eq(1L), anyString(), any());
@@ -121,20 +151,21 @@ class CatalogIndexerTests {
 
 	@Test
 	void aTmdbFailureStopsTheRunSoTheMovieIsIndexedLaterWithCredits() {
-		given(embeddings.isEnabled()).willReturn(true);
+		given(embeddings.configured()).willReturn(List.of(EmbeddingModel.OPENAI));
 		given(tmdb.isEnabled()).willReturn(true);
 		given(repository.tryLock()).willReturn(true);
 		given(repository.pending(1)).willReturn(List.of(DUNE_2));
 		given(tmdb.credits(693134)).willThrow(new MovieApiUnavailableException("TMDB down"));
 
 		assertThat(indexer.indexPending()).isEmpty();
-		verify(embeddings, never()).embed(anyString());
+		verify(embeddings, never()).embed(any(), anyString());
 		verify(repository, never()).insert(anyLong(), anyString(), any());
 		verify(repository, never()).saveCredits(anyLong(), any(), any());
 	}
 
 	@Test
 	void doesNothingWithoutAnEmbeddingEndpoint() {
+		given(embeddings.configured()).willReturn(List.of());
 		assertThat(indexer.indexPending()).isEmpty();
 		verify(repository, never()).tryLock();
 	}

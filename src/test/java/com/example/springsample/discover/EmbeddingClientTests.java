@@ -36,7 +36,7 @@ class EmbeddingClientTests {
 	private EmbeddingClient client(String endpoint, TokenCredential credential) {
 		RestClient.Builder builder = RestClient.builder();
 		server = MockRestServiceServer.bindTo(builder).build();
-		return new EmbeddingClient(new EmbeddingProperties(endpoint, null, 0, null), builder, () -> credential);
+		return new EmbeddingClient(new EmbeddingProperties(endpoint, null, 0, null, null, null, null), builder, () -> credential);
 	}
 
 	private TokenCredential token(String value) {

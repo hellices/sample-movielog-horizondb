@@ -24,3 +24,14 @@ jobs:
           context: .
           platforms: linux/amd64
           push: false
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Bicep build and lint
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep lint --file infra/main.bicep
+      - name: shellcheck hooks
+        run: shellcheck -x -s bash --source-path=SCRIPTDIR hooks/*.sh

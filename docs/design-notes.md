@@ -21,8 +21,12 @@
 | `db/20-vector-index.sql` | `embedding`에 DiskANN 코사인 index를 만듭니다. |
 | `db/30-graph.sql` | 관계형 카탈로그에서 AGE 그래프 `movie_graph`를 처음 만듭니다. 영화마다 임베딩 최근접 3편을 `SIMILAR_TO`로 잇습니다. 이후 변경은 `40-graph-sync.sql`이 반영합니다. |
 | `db/40-graph-sync.sql` | 그래프 변경 queue(`catalog.graph_queue`)와 관계형 테이블 trigger, 바뀐 영화만 그래프에 반영하고 `SIMILAR_TO`를 맞추는 `catalog.process_graph_queue`, 관계형과 그래프의 차이를 queue에 넣는 `catalog.enqueue_graph_drift`(둘 다 SECURITY DEFINER)와 앱의 `INSERT` 권한입니다. `30-graph.sql` 다음에 한 번 실행합니다. |
-| `src/main/java/.../discover/` | 의미 검색(`EmbeddingClient`, 벡터·키워드 순위를 RRF로 합치는 `VectorSearchRepository`), 인물·제목 철자 교정(`QueryCorrector`), 카탈로그 밖 영화 색인(`CatalogIndexer`, `TmdbCreditsClient`), 그래프 조회(`MovieGraphRepository`), `movielog.discover.*` Timer를 기록하는 `DiscoverService`, 웹·API controller입니다. |
+| `src/main/java/.../discover/` | 의미 검색(모델 목록 `EmbeddingModel`·`EmbeddingModels`, Azure OpenAI `EmbeddingClient`, vLLM 등 OpenAI 호환 서버용 `BgeEmbeddingClient`, 벡터·키워드 순위를 RRF로 합치는 `VectorSearchRepository`), 인물·제목 철자 교정(`QueryCorrector`), 카탈로그 밖 영화 색인(`CatalogIndexer`, `TmdbCreditsClient`), 그래프 조회(`MovieGraphRepository`), `movielog.discover.*` Timer를 기록하는 `DiscoverService`, 웹·API controller입니다. |
 | `src/main/resources/templates/discover/`, `static/js/graph.js` | `/discover` 의미 검색 화면과 `/graph/movies/{tmdbId}` 그래프 화면입니다. Cytoscape.js와 fCoSE 레이아웃으로 그리며, 영화 노드는 TMDB 포스터로 표시하고, 범례 칩으로 관계 종류를 거르고, 누른 노드의 정보 패널에서 인물의 다른 작품을 펼칩니다. 키보드·스크린 리더용 관계 텍스트 목록과 영화 링크를 함께 렌더링합니다. |
+| `azure.yaml` | azd 프로젝트입니다. service 없이 hook 네 개(`preprovision`, `postprovision`, `postdeploy`, `predown`)로 배포합니다. |
+| `infra/main.bicep`, `infra/resources.bicep` | HorizonDB를 뺀 Azure 리소스와 역할 할당입니다. hook이 쓰는 이름과 endpoint를 output으로 넘깁니다. |
+| `hooks/` | HorizonDB 생성, DB 준비, Key Vault, Entra ID 앱, Kubernetes 배포, 카탈로그 적재, HTTPS, 정리를 다시 실행해도 같은 결과가 되게 수행합니다. |
+| `k8s/40-embeddings-vllm.yaml` | GPU spot 노드에서 vLLM으로 `dragonkue/BGE-m3-ko`를 서빙하는 Deployment와 클러스터 내부 Service입니다. |
 | `k8s/00-namespace.yaml` | namespace와 workload identity ServiceAccount입니다. |
 | `k8s/20-movielog.yaml` | HorizonDB 연결(secret)과 Azure OpenAI endpoint를 받는 앱 Deployment입니다. |
 | `k8s/24-keyvault-secrets.yaml` | Secrets Store CSI driver가 Key Vault의 TMDB·OMDb 키와 Entra ID client secret을 앱 workload identity로 읽어 `movielog-keyvault` secret으로 동기화하는 SecretProviderClass입니다. |
@@ -108,3 +112,7 @@
   `(a:Movie)`를 Spring의 named parameter로 오인하지 않도록 `JdbcTemplate`을 씁니다.
 - 영화 약 480편 규모에서는 planner가 DiskANN 대신 seq scan을 고릅니다.
   `SET enable_seqscan = off`로 index 경로를 확인할 수 있습니다.
+- **임베딩 모델을 둘 둔 이유** — 기본은 한국어로 미세 조정한 BGE-M3(1,024차원)이고, Azure OpenAI
+  `text-embedding-3-large`(1,536차원)는 같은 질의를 비교하려고 남깁니다. 모델마다 열(`embedding_bge`, `embedding`)과
+  DiskANN index가 따로 있고, SQL의 열 이름과 `vector(n)` 차원은 요청 값이 아니라 `EmbeddingModel` enum에서만 옵니다.
+  `SIMILAR_TO` 그래프 관계는 기본 모델인 bge 임베딩으로 만듭니다.

@@ -1,6 +1,7 @@
 package com.example.springsample.common;
 
 import com.example.springsample.discover.DiscoverUnavailableException;
+import com.example.springsample.discover.UnknownEmbeddingModelException;
 import com.example.springsample.movie.MovieApiUnavailableException;
 import com.example.springsample.review.DuplicateReviewException;
 import org.slf4j.Logger;
@@ -55,6 +56,16 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 				"The movie catalog search is not available right now");
 		problem.setTitle("Catalog search unavailable");
 		problem.setProperty("code", "DISCOVER_UNAVAILABLE");
+		return problem;
+	}
+
+	@ExceptionHandler(UnknownEmbeddingModelException.class)
+	ProblemDetail unknownEmbeddingModel(UnknownEmbeddingModelException ex) {
+		var problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+				"The model parameter must name a configured embedding model");
+		problem.setTitle("Unknown embedding model");
+		problem.setProperty("code", "UNKNOWN_EMBEDDING_MODEL");
+		problem.setProperty("available", ex.getAvailable());
 		return problem;
 	}
 

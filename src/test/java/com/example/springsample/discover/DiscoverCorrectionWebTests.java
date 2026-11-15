@@ -23,8 +23,11 @@ class DiscoverCorrectionWebTests extends IntegrationTest {
 	@Test
 	void searchPageNamesTheCorrectedWords() throws Exception {
 		MovieHit dune = new MovieHit(693134, "듄: 파트 2", "Dune: Part Two", 2024, List.of("SF"), "줄거리", null, 0.27);
-		given(discoverService.searchWithCorrection(eq("드늬 뷜베브"), anyInt(), anyString())).willReturn(
-				new DiscoverService.DiscoverSearch(List.of(dune), new QueryCorrection("드니 빌뇌브", "드늬 뷜베브", "드니 빌뇌브")));
+		given(discoverService.resolveModel(null)).willReturn(EmbeddingModel.OPENAI);
+		given(discoverService.configuredModels()).willReturn(List.of(EmbeddingModel.OPENAI));
+		given(discoverService.searchWithCorrection(eq("드늬 뷜베브"), anyInt(), anyString(), eq(EmbeddingModel.OPENAI)))
+			.willReturn(new DiscoverService.DiscoverSearch(List.of(dune),
+					new QueryCorrection("드니 빌뇌브", "드늬 뷜베브", "드니 빌뇌브"), EmbeddingModel.OPENAI));
 
 		mockMvc.perform(get("/discover").param("q", "드늬 뷜베브"))
 			.andExpect(status().isOk())

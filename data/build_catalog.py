@@ -296,7 +296,7 @@ def write_sql(films: list[dict], path: Path) -> None:
         for genre in film["genres"]:
             lines.append(f"INSERT INTO catalog.movie_genres (tmdb_id, genre) VALUES ({tmdb}, {sql_text(genre)})"
                          " ON CONFLICT DO NOTHING;")
-        # Keep an existing embedding only while the embedded text is unchanged.
+        # Keep existing embeddings only while the embedded text is unchanged.
         lines.append(
             "INSERT INTO catalog.movie_docs (tmdb_id, wikidata_qid, doc, overview, source_url, summary_en_source) VALUES ("
             f"{tmdb}, {sql_text(film['qid'])}, {sql_text(film['doc'])}, {sql_text((film.get('overview') or '')[:4000] or None)}, "
@@ -304,6 +304,7 @@ def write_sql(films: list[dict], path: Path) -> None:
             " ON CONFLICT (tmdb_id) DO UPDATE SET wikidata_qid = EXCLUDED.wikidata_qid, overview = EXCLUDED.overview,"
             " source_url = EXCLUDED.source_url, summary_en_source = EXCLUDED.summary_en_source,"
             " embedding = CASE WHEN catalog.movie_docs.doc = EXCLUDED.doc THEN catalog.movie_docs.embedding END,"
+            " embedding_bge = CASE WHEN catalog.movie_docs.doc = EXCLUDED.doc THEN catalog.movie_docs.embedding_bge END,"
             " doc = EXCLUDED.doc;")
     lines.append("COMMIT;")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
