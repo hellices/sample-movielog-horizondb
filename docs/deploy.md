@@ -10,7 +10,7 @@
 |---|---|
 | 권한 | 구독 Owner. Bicep이 역할을 할당하고 `preprovision`이 미리 보기 기능과 resource provider를 등록합니다. |
 | 도구 | `azd`, Azure CLI 2.89 이상, `kubectl`, `envsubst`(gettext), `jq`, `psql` 15 이상, Python 3, `openssl`, `curl`. HTTPS를 쓰면 `helm`도 필요합니다. Azure CLI `horizondb`·`amg` 확장은 hook이 설치합니다. |
-| 할당량 | 지역의 `standardDSv5Family` vCPU 8개, spot vCPU는 GPU 노드 크기의 vCPU 수만큼(기본 `Standard_NC4as_T4_v3`은 4개, `GPU_VM_SIZE`를 바꾸면 그 크기의 vCPU 수), Azure OpenAI `GlobalStandard` `text-embedding-3-large` 150K TPM. spot VM은 VM 계열과 상관없이 지역의 spot vCPU 할당량을 쓰므로 GPU 계열 할당량이 0이어도 만들 수 있습니다. |
+| 할당량 | 지역의 `standardDSv5Family` vCPU 8개, spot vCPU는 GPU 노드 크기의 vCPU 수만큼(기본 `Standard_NC4as_T4_v3`은 4개, `GPU_VM_SIZE`를 바꾸면 그 크기의 vCPU 수), Azure OpenAI `GlobalStandard` `text-embedding-3-large` 150K TPM. |
 
 ## 환경 값
 
@@ -33,7 +33,7 @@
 azd auth login
 az login                               # hooks use the Azure CLI
 azd env new movielog --location koreacentral
-azd env set APP_HOST movielog.example.com             # optional: HTTPS and Entra ID sign-in
+azd env set APP_HOST movielog.example.com             # optional: public HTTPS and Entra ID sign-in; unset = no public endpoint
 azd env set DNS_ZONE_NAME example.com                 # optional: let the hook manage the CNAME
 azd env set DNS_ZONE_RESOURCE_GROUP rg-dns
 read -rs TMDB_API_TOKEN && export TMDB_API_TOKEN      # optional: posters

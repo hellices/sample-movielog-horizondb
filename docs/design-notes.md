@@ -77,14 +77,16 @@
   - AI Model Management는 limited preview라 참여 신청 승인이 필요합니다. 승인 전에는
     cluster `aiModelManagement`를 `Enabled`로 바꿀 수 없습니다(`AiModelManagementAfecNotRegistered`).
   - `azure_openai.create_embeddings()`·`ai.embed()`는 `{endpoint}/openai/deployments/{deployment}/embeddings`
-    형식으로만 호출하고 `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`를
-    지원합니다. `*.inference.ml.azure.com/score` 같은 Azure ML endpoint는 "Endpoint is not valid"로
-    거부되므로 BGE-M3 같은 오픈 모델은 DB 안에서 임베딩할 수 없습니다.
+    형식으로 호출하며, Learn이 밝힌 임베딩 지원 모델은 `text-embedding-3-small`, `text-embedding-3-large`,
+    `text-embedding-ada-002`입니다. `*.inference.ml.azure.com/score` 같은 Azure ML endpoint는 "Endpoint is not valid"로
+    거부됐습니다. BYOM의 API Management endpoint 등록 경로에 OpenAI 형식으로 응답하는 mock을 두고 모델 이름을
+    `bge-m3-ko`로 등록하면 `ai.embed()`가 응답을 받아들였지만, BGE-M3는 지원 모델 목록 밖이므로 이 예제는 DB 안
+    임베딩 대신 앱에서 임베딩합니다.
 
   key 인증을 끈 Azure OpenAI에서는 앱이 workload identity로 embedding을 받아 벡터를 SQL
   parameter로 넘깁니다. 같은 이유로 앱 쪽 client만 바꾸면 다른 embedding 모델도 쓸 수 있습니다.
-- **모델은 `text-embedding-3-large`를 1,536차원으로 줄여 씁니다.** 한국어 질의로
-  비교했을 때 `text-embedding-3-small`보다 관련 영화가 상위에 왔습니다. 앱과
+- **Azure OpenAI 모델은 `text-embedding-3-large`를 1,536차원으로 줄여 씁니다.** 소규모 한국어 질의 점검을 보고
+  골랐으며, 정답 집합으로 `text-embedding-3-small`과 품질을 평가한 결과는 아닙니다. 앱과
   `embed_catalog.py`는 같은 deployment와 차원을 써야 합니다.
 - **임베딩 문서에는 한국어 요약과 영어 요약을 함께 넣습니다.** 한국어 Wikipedia
   도입부는 제작 정보 위주라 줄거리 질의와 잘 맞지 않았습니다. 화면에는 한국어
@@ -112,7 +114,8 @@
   `(a:Movie)`를 Spring의 named parameter로 오인하지 않도록 `JdbcTemplate`을 씁니다.
 - 영화 약 480편 규모에서는 planner가 DiskANN 대신 seq scan을 고릅니다.
   `SET enable_seqscan = off`로 index 경로를 확인할 수 있습니다.
-- **임베딩 모델을 둘 둔 이유** — 기본은 한국어로 미세 조정한 BGE-M3(1,024차원)이고, Azure OpenAI
-  `text-embedding-3-large`(1,536차원)는 같은 질의를 비교하려고 남깁니다. 모델마다 열(`embedding_bge`, `embedding`)과
+- **임베딩 모델을 둘 둔 이유** — 한국어로 미세 조정한 BGE-M3(1,024차원)와 Azure OpenAI `text-embedding-3-large`
+  (1,536차원)를 요청마다 `model=bge|openai`로 고를 수 있게 두었습니다. 앱 기본값은 BGE-M3이지만 품질 평가에 따른
+  선택이 아니라 예제 구성입니다. 모델마다 열(`embedding_bge`, `embedding`)과
   DiskANN index가 따로 있고, SQL의 열 이름과 `vector(n)` 차원은 요청 값이 아니라 `EmbeddingModel` enum에서만 옵니다.
   `SIMILAR_TO` 그래프 관계는 기본 모델인 bge 임베딩으로 만듭니다.
