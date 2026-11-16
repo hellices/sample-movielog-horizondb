@@ -12,7 +12,7 @@ az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 HORIZONDB_API="api-version=2026-10-01-preview"
 HORIZONDB_ADMIN=movielogadmin
 # Released app version this checkout deploys; the release pull request bumps it with the tag.
-MOVIELOG_VERSION="${MOVIELOG_VERSION:-2.7.0}"
+MOVIELOG_VERSION="${MOVIELOG_VERSION:-2.7.1}"
 # shellcheck disable=SC2034
 GHCR_REPOSITORY=ghcr.io/hellices/sample-movielog-horizondb
 # shellcheck disable=SC2034
