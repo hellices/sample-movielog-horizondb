@@ -13,8 +13,9 @@
 ## 예제 범위
 
 - **의미 검색** — 영화 문서와 질의를 한국어 BGE-M3(`dragonkue/BGE-m3-ko`, 1,024차원)로 임베딩하고, pgvector·DiskANN
-  벡터 순위와 키워드 순위를 RRF로 합칩니다. 인물·제목의 철자 오류도 교정합니다. 비교용으로 Azure OpenAI
-  `text-embedding-3-large`(1,536차원) 임베딩도 함께 저장해 `model=openai|bge`로 결과를 나란히 볼 수 있습니다.
+  벡터 순위와 키워드 순위를 RRF로 합칩니다. 인물·제목의 철자 오류도 교정합니다. Azure OpenAI
+  `text-embedding-3-large`(1,536차원) 임베딩도 함께 저장해 요청마다 `model=openai|bge`로 모델을 고를 수 있습니다.
+  두 모델의 검색 품질 우열은 평가하지 않았습니다.
 - **임베딩 서빙** — BGE-M3는 AKS의 NVIDIA T4 spot 노드에서 vLLM(OpenAI 호환 `/v1/embeddings`)으로 서빙합니다.
 - **영화 그래프** — 같은 카탈로그를 Apache AGE 그래프(감독·배우·장르·비슷한 영화)로 만들어 Cytoscape.js로
   그립니다. 원본이 바뀌면 trigger queue로 바뀐 영화만 그래프에 반영합니다.
@@ -27,7 +28,7 @@
 |---|---|
 | 앱 | Spring Boot 4.1.2, Java 25, Thymeleaf, Gradle Kotlin DSL |
 | DB | Azure HorizonDB(PostgreSQL 17, 미리 보기), `vector`·`pg_diskann`·`age` 확장 |
-| 임베딩 | `dragonkue/BGE-m3-ko`(1,024차원, vLLM 0.32 · `Standard_NC4as_T4_v3` spot), 비교용 Azure OpenAI `text-embedding-3-large`(1,536차원, Microsoft Entra 인증) |
+| 임베딩 | `dragonkue/BGE-m3-ko`(1,024차원, vLLM 0.32 · `Standard_NC4as_T4_v3` spot)와 Azure OpenAI `text-embedding-3-large`(1,536차원, Microsoft Entra 인증) 중 요청마다 선택 |
 | 실행 환경 | AKS, Application Gateway for Containers, cert-manager, Key Vault CSI driver |
 | 관측 | Application Insights, Azure Managed Grafana |
 | 데이터 | Wikidata·Wikipedia 영화 약 480편, TMDB 포스터 |
@@ -63,7 +64,7 @@ Azure Developer CLI(`azd`)로 리소스 생성, 앱 배포, 카탈로그 적재�
 ```bash
 azd auth login && az login
 azd env new movielog --location koreacentral
-azd env set APP_HOST movielog.example.com   # optional: HTTPS and Microsoft Entra ID sign-in
+azd env set APP_HOST movielog.example.com   # optional: public HTTPS and Entra ID sign-in; unset = no public endpoint, use kubectl port-forward
 azd up
 azd down --purge
 ```
@@ -93,8 +94,15 @@ azd down --purge
 
 1. 변경을 PR로 `main`에 merge합니다. PR마다 CI와 Copilot 코드 리뷰를 거칩니다. 릴리스 PR에서는 `hooks/lib.sh`의
    `MOVIELOG_VERSION`을 새 버전으로 올립니다.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`로 태그를 올리면 release workflow가 앱 이미지와 agent init image를 GHCR에
-   게시합니다.
+2. merge된 원격 `main`에 태그를 붙여 올리면 release workflow가 앱 이미지와 agent init image를 GHCR에 게시합니다. 로컬
+   작업 브랜치의 `HEAD`가 아니라 `origin/main`을 대상으로 지정합니다. build metadata(`+...`)가 붙은 태그는 workflow가
+   게시 전에 거부합니다.
+
+   ```bash
+   git fetch origin
+   git tag vX.Y.Z origin/main
+   git push origin vX.Y.Z
+   ```
 3. workflow 요약의 `ref`, `commit`, `image` 값을 문서 레포 `sample.yml`에 옮기고 submodule을 같은 commit으로 맞춥니다.
 
 ## 데이터 출처

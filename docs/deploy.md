@@ -33,7 +33,7 @@
 azd auth login
 az login                               # hooks use the Azure CLI
 azd env new movielog --location koreacentral
-azd env set APP_HOST movielog.example.com             # optional: HTTPS and Entra ID sign-in
+azd env set APP_HOST movielog.example.com             # optional: public HTTPS and Entra ID sign-in; unset = no public endpoint
 azd env set DNS_ZONE_NAME example.com                 # optional: let the hook manage the CNAME
 azd env set DNS_ZONE_RESOURCE_GROUP rg-dns
 read -rs TMDB_API_TOKEN && export TMDB_API_TOKEN      # optional: posters
